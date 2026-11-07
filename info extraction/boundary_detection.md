@@ -18,15 +18,18 @@ interpreted_lithology_column.png ──┐
 pattern library (swatches+names) ──┘
 ```
 
-The pattern library comes from one of two places:
+The pattern library is always built from the legend of the **same document**.
+The legend is run through `models/swatch_detection.pt`, which returns the swatch
+boxes and their labels; each swatch becomes a library entry.
 
-| mode | flag | source |
-|---|---|---|
-| global | `--patterns` / `--names` | `crops/lithology/patterns` + `crops/lithology/name` (from `crop_dataset_classes.py`) |
-| per-document | `--legend` | swatches detected inside the legend of the **same** scan |
+Legends are paired with columns by file stem, so
+`crops/interpreted_lithology_column/foo.png` uses
+`crops/lithology_legend/foo.png`. `--legend` forces one legend for every
+column, `--legend-dir` points at a different folder.
 
-The per-document mode is more accurate because the swatch and the column are
-then rendered by the same scan at the same scale.
+There is no global pattern pool: a swatch and the column it is matched against
+must come from the same scan, because that is the only way their rendering and
+scale agree.
 
 ---
 
@@ -194,197 +197,204 @@ Same-well matching (gb506 column vs gb506 legend swatches):
 | 2210–8417 | **Shale** | 0.16 |
 | 0–440 (mostly blank) | Clay/Shale | 0.71 |
 
-Cross-well matching (d-582 column vs the global pshhYolo library) gives
-nonsense (`PORCELANITE`, `OBSIDIAN`) because d-582 is not in that library —
-see [limitations](#5-known-limitations).
+This is why the library is built per document: matching a column against
+swatches from a *different* well gives nonsense (`PORCELANITE`, `OBSIDIAN`),
+because every well draws its patterns slightly differently.
 
 ---
 
 ## 2. Legend detection
 
-`detect_swatches()` finds the bordered swatch rectangles in a legend image.
-It is used by `--legend` to build a per-document pattern library.
+`load_library_from_legend()` uses a YOLO detector — `models/swatch_detection.pt` —
+to find the swatches and their labels. There is no hand-written rectangle
+detection any more.
 
-### 2.1 The problem
+### 2.1 The model
 
-A legend is a grid of small bordered rectangles, each containing a pattern, with
-the lithology name written to the right:
+| property | value |
+|---|---|
+| file | `models/swatch_detection.pt` |
+| task | object detection (Ultralytics YOLO) |
+| classes | `material_name` (0), `material_texture` (1) |
+| trained on | the pshhYolo legend dataset |
 
-```
-┌────────┐
-│ ▬ ▬ ▬  │  Clay/Shale
-└────────┘
-┌────────┐
-│ ▭▭▭▭▭  │  Limestone
-└────────┘
-```
+It returns both boxes we need in one pass: the swatch (`material_texture`) and
+the text label beside it (`material_name`).
 
-The borders are **1 px lines** in a scanned image, and they are not reliable:
-
-- the **left/right** rules are continuous,
-- the **top/bottom** rules are often **clipped** where the pattern touches them,
-- a **solid** swatch (coal) makes every interior column look like a rule.
-
-### 2.2 Step 1 — collect long runs
+### 2.2 Step 1 — run inference
 
 ```python
-def _runs_1d(mask):
-    edges = np.diff(np.concatenate(([0], mask.astype(np.int8), [0])))
-    return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
+result = model.predict(legend_path, conf=0.25, imgsz=960)[0]
 ```
 
-For every column, keep vertical ink runs of at least `min_height` (30 px).
-For every row, keep horizontal ink runs of at least `min_width` (50 px).
+**`imgsz=960` matters.** Legends are wide and short (e.g. 1513×407), so the
+Ultralytics default of 640 downsamples them too aggressively and small swatches
+are lost. Measured on the gb506 legend:
 
-### 2.3 Step 2 — pair the vertical rules
+| `imgsz` | swatches found (conf 0.25) |
+|---|---|
+| 640 | 13 |
+| **960** | **16** |
+| 1280 | 11 |
+
+`--swatch-conf` and `--swatch-imgsz` expose both knobs.
+
+### 2.3 Step 2 — split the detections by class
 
 ```python
-for i, (x1, top1, bottom1) in enumerate(verticals):
-    for x2, top2, bottom2 in verticals[i + 1:]:
-        if not (50 <= x2 - x1 <= 400):            continue   # plausible width
-        if abs(top1 - top2) > 4:                  continue   # same top
-        if abs(bottom1 - bottom2) > 4:            continue   # same bottom
-        if not (30 <= bottom - top <= 300):       continue   # plausible height
-        if has_horizontal(top, x1, x2) and has_horizontal(bottom, x1, x2):
-            found.append((x1, top, x2, bottom))
+for box in result.boxes:
+    label = model.names[int(box.cls)]
+    xyxy  = tuple(float(v) for v in box.xyxy[0])
+    if   label == "material_texture": textures.append(xyxy)
+    elif label == "material_name":    names.append(xyxy)
 ```
 
-**Verticals first, horizontals as confirmation.** This is the important design
-choice. Pairing horizontals first fails on real legends because the bottom rule
-of the Limestone swatch spans `x = 89–244` while the top spans `x = 75–243` — a
-14 px difference that no small tolerance absorbs. The vertical rules at `x = 75`
-and `x = 242` are both continuous over `y = 121–241`, so they pair cleanly.
+If no `material_texture` box is found the function exits with a message
+suggesting a lower `--swatch-conf`.
 
-### 2.4 Step 3 — confirm with a tolerant horizontal check
+### 2.4 Step 3 — pair each swatch with its name
+
+The model gives two independent lists, so they have to be paired. In a legend
+the name sits to the **right** of its swatch on the **same row**:
 
 ```python
-def has_horizontal(y, x1, x2):
-    span = x2 - x1
-    for dy in range(-4, 5):
-        for left, right in horizontals.get(y + dy, ()):
-            overlap = min(right, x2) - max(left, x1)
-            if overlap >= 0.85 * span:
-                return True
-    return False
+overlap = min(texture[3], name[3]) - max(texture[1], name[1])
+if overlap / min(height(texture), height(name)) < 0.5:
+    continue                                   # different row
+gap   = name[0] - texture[2]                   # horizontal distance
+score = abs(gap) + 0.5 * abs(centre_y(texture) - centre_y(name))
+if gap < 0:
+    score += 0.25 * abs(gap)                   # prefer names on the right
 ```
 
-The **85 %** threshold is load-bearing:
+Two details that matter:
 
-- the correct pairing (75→242) is confirmed by the clipped bottom rule at
-  `89–244`, which overlaps **92 %** of the span → accepted;
-- a wrong pairing that spans two adjacent swatches (75→327) is only covered
-  **67 %** by the top rule → rejected.
+- **`abs(gap)`, not `max(gap, 0)`.** Clamping negative gaps to zero lets a name
+  far to the *left* outscore the correct adjacent one. This was a real bug: in
+  one legend a swatch at `x=505` was matched to `CLAY` at `x=293` instead of
+  `GRANITE` at `x=545`.
+- **Greedy with a used-set**, so one name cannot be claimed by two swatches.
+  If nothing overlaps vertically, the nearest name overall is used as a
+  fallback.
 
-A looser 60 % threshold merged Limestone+Dolomite into one 252 px box; 85 %
-separates them.
+### 2.5 Step 4 — read the label
 
-### 2.5 Step 4 — de-duplicate by area
+The paired `material_name` box is cropped and read with RapidOCR in
+**recognition-only** mode (`use_det=False, use_cls=False, use_rec=True`) — the
+box is already known, so running the detector again is slower and less reliable
+on tight single-line crops.
 
-A solid swatch (coal) makes every interior column a valid "vertical rule", so
-pairing produces dozens of nested slices of the same box. Keep the largest and
-drop anything that overlaps it:
+If OCR returns nothing the swatch is named `swatch_<x>_<y>`.
 
-```python
-found.sort(key=lambda r: -((r[2]-r[0]) * (r[3]-r[1])))   # biggest first
-unique = []
-for rect in found:
-    if not any(overlaps(rect, other) for other in unique):
-        unique.append(rect)
-return sorted(unique, key=lambda r: (r[1], r[0]))        # reading order
-```
+### 2.6 Step 5 — describe the swatch
 
-### 2.6 Step 5 — read the label
-
-The name sits to the right of the swatch, bounded by the next swatch on the
-same row:
-
-```python
-label_right = min(image.width, x2 + 220)
-for other_x1, other_y1, _, _ in swatches:
-    if other_x1 > x2 and abs(other_y1 - y1) < 20:
-        label_right = min(label_right, other_x1 - 4)
-
-name = _ocr_name(image.crop((x2 + 4, y1, label_right, y2)))
-```
-
-OCR is RapidOCR in **recognition-only** mode (`use_det=False, use_cls=False,
-use_rec=True`) — the box is already known, so running the detector again is
-slower and less reliable on tight single-line crops. If OCR returns nothing the
-swatch is named `swatch_<x>_<y>`.
-
-The swatch itself is cropped 2 px inside its border before describing it, so the
-border does not pollute the texture statistics.
+The swatch is cropped **2 px inside** the detected box, so the border does not
+pollute the texture statistics, then reduced to the 7-element descriptor from
+[§1.4](#14-step-3--the-7-element-descriptor).
 
 ### 2.7 Measured behaviour
 
-| legend | swatches found | expected | notes |
+| legend | swatches | names | after `--filter-names` |
 |---|---|---|---|
-| gb506#2_md | **25** | 25 | clean 5×5 grid, all correct |
-| d-582 log01 | **3** | 10 | borders broken by the pattern |
+| gb506#2_md | 16 | 17 | **13** clean lithologies |
+| d-582 log01 | 6 | 23 | 7, all `swatch_*` fallbacks |
 
-The d-582 legend is the known failure case: several swatches have both their
-top/bottom *and* one vertical rule interrupted, so no rectangle can be closed.
-The function warns when it finds fewer than 3 swatches and suggests `--patterns`
-instead.
+The gb506 library comes out correct:
 
----
-
-## 3. How the two combine
-
-`segment_column()` runs four stages:
-
-### 3.1 Straighten (per-band border detection)
-
-The scanned column is **skewed** — its rules drift ~52 px left over 88 000 px:
-
-| y | left rule | right rule |
-|---|---|---|
-| 0 | x = 52–59 | x = 289–292 |
-| 20 000 | x = 41–48 | x = 278–281 |
-| 40 000 | x = 22–29 | x = 259–262 |
-| 80 000 | x = 0–7 | x = 236–239 |
-
-So the rules are found **per band**, not once globally:
-
-```python
-density = band.mean(axis=0)
-solid   = np.flatnonzero(density > 0.80)     # RULE_DENSITY
-left    = end of the first solid run
-right   = start of the last solid run
+```
+Clay/Shale, Shale, Siltstone, Sandstone, Chert, Limestone,
+Dolomite, Halite, Anhydrite, Gypsum, Core, Plastic Clay, Diatomite
 ```
 
-If a band has no clear rules (a solid coal interval), the previous band's
-borders are reused.
+and the descriptors are sensible — `Clay/Shale` scores 0.91 in the
+horizontal-edge bin, `Siltstone` 0.50/0.50 across the horizontal and vertical
+bins, `Core` 0.87 in the horizontal bin (it is drawn as vertical rules).
 
-### 3.2 Describe
+The d-582 legend is the known failure case: the model finds only 6 of its 10
+swatches and reads 23 text fragments as names, so the pairing is unreliable.
+The function warns when `len(names) > 2 * len(textures)`.
 
-Every band (100 px tall, 10 px step) is cut inside its rules and reduced to the
-7-element descriptor from [§1.4](#14-step-3--the-7-element-descriptor).
+## 3. How the two passes work
 
-### 3.3 Detect boundaries
+### 3.1 Pass 1 - the centre line
 
-Per-band labels flicker, so boundaries are found from **change points** instead:
+**Strip edges, per band.** The crop is skewed (the d-582 strip drifts ~52px
+over 88,000 rows) and sometimes includes the depth-tick gutter or a neighbour's
+edge. The image is cut into 200-row bands; each band's left/right rules are the
+columns whose ink density exceeds 80%. Bands with no rules (blank, or a solid
+interval that fills the strip) reuse the nearest band's edges, and every reuse
+is reported. The per-band edges are interpolated linearly down the image, which
+follows the skew.
 
-```python
-for i in range(window, count - window):
-    above = features[i - window : i].mean(axis=0)
-    below = features[i : i + window].mean(axis=0)
-    difference[i] = norm((above - below) * FEATURE_WEIGHTS)
+**The centre band.** A band 5% of the strip width is centred on the strip.
+Each row becomes one bit: any ink in the band or not. A one-pixel column would
+sit in the white gap of striped patterns; a band this wide catches the stripes
+while staying inside the pattern. The test is vectorised with prefix sums, so
+an 88,000-row column costs one pass.
 
-threshold = difference.mean() + sensitivity * difference.std()
-peaks     = local maxima of difference above threshold
-peaks     = non-maximum suppression with radius `window`
-```
+**Runs to regions.** Runs of one state longer than `--stable` (default 120
+rows) are anchors: paper -> `empty`, ink -> a `solid` interval. Everything
+shorter is stripe-level flipping, so consecutive short runs merge into one
+`texture` region. Measured on d-582 log01 there are *zero* runs between 50px
+and 1000px - stripe runs and stable runs are cleanly separated - but a handful
+of columns (Callaway, Rio_Lavaca, mc761) have runs in that middle range, so
+the threshold is a flag, not a constant.
 
-`--sensitivity` (default 1.0) is the knob: lower finds more boundaries.
+Regions shorter than `--min-interval` are absorbed into the taller neighbour;
+how many boundaries this removed is reported.
 
-### 3.4 Classify
+**What pass 1 cannot see.** If two neighbouring intervals are both striped and
+no white gap separates them, the centre line never flips there and pass 1
+returns one texture region. This is a property of the signal. On gb506 the
+blank top ends at 532px and the remaining 7,584 rows are a single burst; the
+internal boundaries come from pass 2.
 
-Each finished segment is classified using the **mean descriptor of the whole
-segment**, not a single band — which is why the confidence values are stable.
+### 3.2 Pass 2 - self-referential boundaries, then swatch naming
 
-`_merge_short()` then absorbs intervals shorter than `--min-interval` into the
-taller neighbour and re-joins neighbours that ended up with the same name.
+**The continuity test.** For every candidate row y inside a texture region,
+cut the strip's row profile into an upper half `[y-120, y)` and a lower half
+`[y, y+120)`, then search +/-40 rows for the lag that best continues the
+upper half into the lower half. d(y) = 1 minus that best correlation.
+
+The continuation lag of a period-P pattern is `-120 + k*P`, which is usually
+**positive** - the first prototype silently skipped every positive lag (its
+windows were 2H wide, so positive shifts fell outside) and the numbers caught
+it. The window is `2H + 2*lags` wide so both halves can slide.
+
+Inside one continuous texture d hugs the burst's own noise floor; where the
+pattern stops continuing it spikes. Peaks clear `z` robust deviations above
+the burst's median (`--boundary-z`, default 4, with a small absolute floor so
+a perfectly uniform burst cannot turn scan wobble into "boundaries"), are at
+least 80 rows apart, and never within 120 rows of the burst edges - pass 1
+already put boundaries there.
+
+Why self-referential: the test compares the column with itself, never with
+the legend, so the rendering mismatch that kills 2D template matching (§1.1)
+cannot occur.
+
+**Verified against eyes, not just numbers** (d-582, boundaries judged at 2x
+zoom): y=31,153 dots->brackets REAL, y=67,743 and y=55,363 brackets->dashes
+REAL, y=20,530 real-but-gradual (dashes shrink progressively into dots; scored
+below threshold - a gradual change has no single boundary row). Negative
+control: gb506 shows no boundary at its old pass-2 positions, and at 2x zoom
+there is genuinely none - the column is one continuous dash texture.
+
+**Naming.** Each segment between boundaries is classified by the scale library
+(swatch resized over the scale grid, descriptor distance). Because boundaries
+no longer come from label changes, look-alike ties cannot manufacture
+boundaries; a tie only weakens the segment's confidence, which is reported.
+
+The median winning scale across the column is reported as the general swatch
+size (gb506 1.2, hadrian 1.5, Rio_Lavaca 0.9).
+
+Blank regions skip everything: they are `empty`, confidence 1.0.
+
+### 3.3 What the output carries
+
+Each interval records `kind` (texture/solid/empty), `ink` (the ink fraction of
+the full strip, not just the centre band), `scale`, `confidence` and
+`runner_up`. The ink fraction makes labels auditable: an `empty` interval with
+20% ink is visibly wrong, and `--validate` fails the run when that happens.
 
 ---
 
@@ -392,32 +402,38 @@ taller neighbour and re-joins neighbours that ended up with the same name.
 
 | flag | default | effect |
 |---|---|---|
-| `--band` | 100 | texture window height (px) |
-| `--step` | 10 | vertical step between windows |
-| `--window` | 8 | bands compared on each side of a boundary |
-| `--sensitivity` | 1.0 | boundary threshold in std devs (lower = more) |
-| `--min-interval` | 30 | shorter intervals are absorbed |
+| `--centre-band` | 0.05 | centre band width, fraction of the strip |
+| `--band-height` | 200 | rows per band when locating the strip edges |
+| `--stable` | 120 | runs longer than this are anchors, not stripes |
+| `--boundary-z` | 4.0 | continuity-peak threshold (lower = more boundaries) |
+| `--min-interval` | 30 | shorter regions are absorbed into a neighbour |
 | `--min-confidence` | 0.0 | below this the label becomes `unknown` |
 | `--filter-names` | off | drop non-lithology legend entries |
-| `--legend` | — | build the library from the same document (best) |
-
----
+| `--legend-dir` | `crops/lithology_legend` | folder paired with columns by stem |
+| `--legend` | - | force one legend for every column |
+| `--swatch-conf` / `--swatch-imgsz` | 0.25 / 960 | swatch detector knobs |
 
 ## 5. Known limitations
 
-1. **Library coverage.** 18 of 51 wells have no pshhYolo legend, including all
-   the wide d-582 columns. Matching those against other wells' patterns is
-   unreliable. Use `--legend` for those.
+1. **Striped-to-striped boundaries are invisible to pass 1.** Where two
+   neighbours both stripe and no white gap separates them, the centre line
+   never flips; the boundary comes only from pass 2's label changes, which are
+   quantised to `--step` and uncertain by about half a window.
 
-2. **Broken legend borders.** The d-582 legend defeats `detect_swatches()`
-   (3/10). A more tolerant detector — or hand-supplied swatches — is needed.
+2. **Every column needs its legend.** If no legend with the same file stem
+   exists in `--legend-dir`, the column is skipped with an error. Use
+   `--legend` to force one.
 
-3. **Similar textures.** `Sand` vs `Medium sand` vs `Fine sandstone` are
-   genuinely hard to separate at this descriptor resolution; expect them to be
-   confused. The `runner_up` field reports what the second choice was.
+3. **The swatch model is trained on pshhYolo-style legends.** 12 legends
+   produce fewer than 2 usable swatches - on d-582 the model reads the
+   "LITHOLOGY SYMBOLS" title as swatches and swatch interiors as names, and
+   the resulting library is rejected by the guards.
 
-4. **Density does not transfer.** The column draws denser than the legend, so
-   density is weighted low (0.3) and only trusted for solid fills.
+4. **Look-alike patterns tie.** Clay vs Halite-style pairs can sit 0.001 apart
+   in descriptor space; hysteresis keeps the first label and reports the tie
+   instead of oscillating, but the resulting label is weakly supported - check
+   the confidence column.
 
-5. **Boundaries are more reliable than names.** The change-point stage is
-   stable and contiguous; the naming is only as good as the library.
+5. **Scale is swept, not derived.** The winning scale comes from a 0.1-step
+   grid, so window-to-window scale varies by up to 0.05. The median scale per
+   column is reported so systematic drift is visible.
