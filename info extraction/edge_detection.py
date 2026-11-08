@@ -1,3 +1,5 @@
+import json
+
 import cv2
 import numpy as np
 from rapidocr_onnxruntime import RapidOCR
@@ -112,4 +114,21 @@ for y_pos in filtered_lines_y:
     cv2.line(output_img, (start_x, y_pos), (end_x, y_pos), (0, 0, 255), 1)
 
 cv2.imwrite('accurate_tracks_visualized.png', output_img)
+
+# --- E. EXPORT BOUNDING BOX OF THE VISUALIZED LINES ---
+bbox = [
+    int(start_x),
+    int(filtered_lines_y[0]) if filtered_lines_y else 0,
+    int(end_x),
+    int(filtered_lines_y[-1]) if filtered_lines_y else h,
+]
+
+with open('horizontal_lines.json', 'w') as f:
+    json.dump({
+        "image": 'larpteryx.png',
+        "image_size": {"width": int(w), "height": int(h)},
+        "bbox": bbox,
+    }, f, indent=2)
+
 print(f"Target track found at X: {start_x} to {end_x} with {len(filtered_lines_y)} horizontal lines rendered.")
+print("bbox (x1, y1, x2, y2):", tuple(bbox))
