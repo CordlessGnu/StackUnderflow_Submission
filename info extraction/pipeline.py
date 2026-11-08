@@ -50,6 +50,7 @@ class PipelineConfig:
     depth_rotation: str = 'auto'
     depth_label_mode: str = 'auto'
     depth_unit: str = 'unspecified'
+    depth_rounding: float = 10
     coordinate_system: str = 'document'
     strict_legend: bool = False
     page: int = 0
@@ -65,6 +66,8 @@ class PipelineConfig:
             raise ValueError('Invalid depth rotation')
         if self.depth_label_mode not in ('auto', 'integer', 'decimal', 'all'):
             raise ValueError('Invalid depth label mode')
+        if not math.isfinite(self.depth_rounding) or self.depth_rounding < 0:
+            raise ValueError('depth_rounding must be finite and nonnegative')
         if not 0 <= self.margin < 0.45:
             raise ValueError('margin must be in [0, 0.45)')
         for value in (self.boundary_threshold, self.color_threshold, self.cluster_threshold, self.max_match_distance):
@@ -285,14 +288,16 @@ def run_pipeline(image_path: str | Path, annotation_path: str | Path,
                 raise ValueError('Cached calibration resolution does not match the new native-resolution depth crop')
         warnings.extend(calibration.warnings)
         rows = attach_depths([asdict(row) for row in labelled.intervals], calibration, alignment,
-                             column.height, depth_unit=config.depth_unit)
+                             column.height, depth_unit=config.depth_unit,
+                             depth_rounding=config.depth_rounding)
         extrapolated = sum(row['depth_extrapolated'] for row in rows)
         if extrapolated:
             warnings.append(f'{extrapolated} intervals require flagged depth extrapolation.')
 
         def export():
             write_final(rows, column, calibration, alignment, output, 'intervals', warnings=warnings,
-                        clusters=labelled.clusters, coordinate_system=config.coordinate_system)
+                        clusters=labelled.clusters, coordinate_system=config.coordinate_system,
+                        depth_rounding=config.depth_rounding)
             save_calibration(calibration, depth_path, output / 'depth_calibration')
 
         stage('6/6 final CSV, JSON and annotated column', export)
@@ -323,6 +328,8 @@ def main() -> None:
     parser.add_argument('--calibration', type=Path, help='optional inspected native-resolution depth calibration')
     parser.add_argument('--coordinate-system', choices=['document', 'crop'], default='document')
     parser.add_argument('--depth-unit', default='unspecified')
+    parser.add_argument('--depth-rounding', type=float, default=10,
+                        help='round exported depths to the nearest N units; 0 keeps full precision')
     parser.add_argument('--depth-samples', type=int, default=12)
     parser.add_argument('--depth-rotation', choices=['auto', '0', '90', '270'], default='auto')
     parser.add_argument('--depth-label-mode', choices=['auto', 'integer', 'decimal', 'all'], default='auto')

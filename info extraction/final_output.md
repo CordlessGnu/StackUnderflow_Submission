@@ -133,9 +133,12 @@ Already generated under **`crops/final_output/`** for Rio Lavaca:
   **`top_y,bottom_y,cluster_id,lithology,top_depth,base_depth`**.
   Existing `match_distance`, `match_margin`, `runner_up`, and `match_status` (or
   other input confidence columns) follow. Depth diagnostics add `depth_unit`,
-  `depth_extrapolated`, `document_top_y`, and `document_bottom_y`.
+  `depth_extrapolated`, `top_depth_exact`, `base_depth_exact`, `document_top_y`,
+  and `document_bottom_y`.
 - `<stem>.json`: intervals, available cluster summaries, full calibration and
-  accepted/excluded anchors, crop alignment, and warnings.
+  accepted/excluded anchors, crop alignment, `depth_rounding`, and warnings. Its
+  `top_depth`/`base_depth` are the **unrounded** fit values, so the table stays
+  auditable against the reported RMSE.
 - `<stem>.png`: original column with cluster-coloured boundaries, lithology/ID
   labels, and interval top/base depths. Text is omitted in very thin intervals
   where it would be illegible; those intervals still appear in CSV/JSON.
@@ -152,6 +155,12 @@ crop geometry is known. Adjacent interval boundaries map to identical depths.
 `unspecified`; pass **`--depth-unit ft`** or **`--depth-unit m`** only when known
 from the document. The values are not silently assumed to be feet or converted
 between units.
+
+**Rounding:** exported `top_depth`/`base_depth` are rounded half-up to the nearest
+**10** units by default (`--depth-rounding N`, `0` disables it). This hides
+sub-unit fit error, so the unrounded values are kept as `top_depth_exact` /
+`base_depth_exact` in the CSV and as `top_depth`/`base_depth` in the JSON. The
+annotated PNG uses the same rounded values as the CSV.
 
 **Confidence:** lithology distance/margin/status are retained, not represented as
 calibrated probabilities. Calibration RMSE is reported in depth-crop pixels in

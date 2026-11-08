@@ -139,7 +139,8 @@ class FinalDepthOutputTests(unittest.TestCase):
 
     def test_offsets_and_different_resize_scales_are_respected(self):
         alignment = CropAlignment(column_top=1000, depth_top=900, column_scale=2, depth_scale=0.5)
-        rows = attach_depths(self.rows, self.calibration, alignment, 100, depth_unit='ft')
+        rows = attach_depths(self.rows, self.calibration, alignment, 100, depth_unit='ft',
+                             depth_rounding=0)
         self.assertEqual(rows[0]['document_top_y'], 1010)
         self.assertEqual(rows[0]['document_bottom_y'], 1020)
         self.assertEqual(rows[0]['top_depth'], 1011)
@@ -148,6 +149,28 @@ class FinalDepthOutputTests(unittest.TestCase):
         self.assertEqual(rows[0]['match_distance'], '0.12')
         self.assertEqual(rows[0]['top_y'], 20)
         self.assertNotIn('top_depth', self.rows[0])  # original is not mutated
+
+    def test_depths_round_to_nearest_ten_by_default(self):
+        calibration = DepthCalibration(0.09999955, 6861.2, 10000,
+                                        [DepthAnchor(6861.2, 0), DepthAnchor(7861.2, 10000)], [], 0, 0)
+        rows = attach_depths([dict(top_y=0, bottom_y=1000, cluster_id='C001', lithology='Shale')],
+                             calibration, CropAlignment(), 1000)
+        self.assertEqual(rows[0]['top_depth'], 6860)
+        self.assertEqual(rows[0]['base_depth'], 6960)
+        self.assertAlmostEqual(rows[0]['top_depth_exact'], 6861.2, places=4)
+        self.assertAlmostEqual(rows[0]['base_depth_exact'], 6961.19955, places=4)
+
+    def test_rounding_is_half_up_and_configurable(self):
+        calibration = DepthCalibration(0.1, 2349.856, 1000,
+                                        [DepthAnchor(2349.856, 0), DepthAnchor(2449.856, 1000)], [], 0, 0)
+        row = dict(top_y=0, bottom_y=10, cluster_id='C001', lithology='Shale')
+        self.assertEqual(attach_depths([row], calibration, CropAlignment(), 100)[0]['top_depth'], 2350)
+        self.assertEqual(attach_depths([row], calibration, CropAlignment(), 100,
+                                       depth_rounding=5)[0]['top_depth'], 2350)
+        self.assertEqual(attach_depths([row], calibration, CropAlignment(), 100,
+                                       depth_rounding=0)[0]['top_depth'], 2349.856)
+        with self.assertRaises(ValueError):
+            attach_depths([row], calibration, CropAlignment(), 100, depth_rounding=-1)
 
     def test_adjacent_boundaries_have_identical_depths(self):
         rows = [dict(top_y=0, bottom_y=100, cluster_id='A', lithology='Shale'),
@@ -211,9 +234,11 @@ class FinalDepthOutputTests(unittest.TestCase):
                                                          'top_depth', 'base_depth'])
                 record = next(reader)
             self.assertEqual(record['confidence'], '0.8')
-            self.assertEqual(float(record['top_depth']), 1004)
+            self.assertEqual(float(record['top_depth']), 1000)  # 1004 rounded to the nearest 10
             data = json.loads((path / 'example.json').read_text())
             self.assertEqual(data['calibration']['slope'], 0.2)
+            self.assertEqual(data['depth_rounding'], 10)
+            self.assertEqual(data['intervals'][0]['top_depth'], 1004)  # JSON keeps the unrounded fit
             self.assertTrue((path / 'example.png').exists())
             loaded = read_labelled_csv(path / 'example.csv')
             self.assertEqual(loaded[0]['cluster_id'], 'C001')

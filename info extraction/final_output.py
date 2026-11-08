@@ -113,10 +113,30 @@ def read_labelled_csv(path: str | Path) -> list[dict]:
     return rows
 
 
+def round_depth(value: float, step: float) -> float:
+    """Half-up rounding to a multiple of step; step <= 0 disables rounding."""
+    if not step or step <= 0:
+        return value
+    rounded = math.floor(value / step + 0.5) * step
+    return int(rounded) if float(rounded).is_integer() else rounded
+
+
+def format_depth(value: float) -> str:
+    """Render a depth without trailing zeros, e.g. 2350 or 11879.5."""
+    return f'{value:.2f}'.rstrip('0').rstrip('.')
+
+
 def attach_depths(rows: Sequence[dict], calibration: DepthCalibration,
                    alignment: CropAlignment, column_height: int, *,
-                   depth_unit: str = 'unspecified') -> list[dict]:
-    """Preserve crop-local interval edges; compute depths in depth-crop space."""
+                   depth_unit: str = 'unspecified', depth_rounding: float = 10) -> list[dict]:
+    """Preserve crop-local interval edges; compute depths in depth-crop space.
+
+    top_depth/base_depth are rounded to the nearest depth_rounding units for the
+    exported table. The unrounded values are kept in top_depth_exact/base_depth_exact
+    so intervals.json stays auditable against the fit residual.
+    """
+    if not math.isfinite(depth_rounding) or depth_rounding < 0:
+        raise ValueError('depth_rounding must be finite and nonnegative')
     output = []
     previous_end = 0
     for original in rows:
@@ -127,8 +147,11 @@ def attach_depths(rows: Sequence[dict], calibration: DepthCalibration,
             raise ValueError('Intervals must be sorted, non-overlapping integer ranges within the column')
         previous_end = bottom
         depth_top_y, depth_bottom_y = alignment.depth_y(top), alignment.depth_y(bottom)
-        row.update(top_depth=round(calibration.depth_at(depth_top_y), 6),
-                   base_depth=round(calibration.depth_at(depth_bottom_y), 6),
+        exact_top, exact_bottom = calibration.depth_at(depth_top_y), calibration.depth_at(depth_bottom_y)
+        row.update(top_depth=round_depth(exact_top, depth_rounding),
+                   base_depth=round_depth(exact_bottom, depth_rounding),
+                   top_depth_exact=round(exact_top, 6),
+                   base_depth_exact=round(exact_bottom, 6),
                    depth_unit=depth_unit,
                    depth_extrapolated=bool(depth_top_y < calibration.min_y or depth_bottom_y > calibration.max_y),
                    document_top_y=(round(alignment.document_y(top), 6)
@@ -142,7 +165,7 @@ def attach_depths(rows: Sequence[dict], calibration: DepthCalibration,
 def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCalibration,
                 alignment: CropAlignment, output: str | Path, stem: str, *,
                 warnings: Sequence[str] = (), clusters: Sequence[dict] = (),
-                coordinate_system: str = 'crop') -> None:
+                coordinate_system: str = 'crop', depth_rounding: float = 10) -> None:
     if coordinate_system not in ('crop', 'document'):
         raise ValueError('coordinate_system must be crop or document')
     if coordinate_system == 'document' and not alignment.document_coordinates_known:
@@ -156,18 +179,23 @@ def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCali
             for key in ('top_y', 'bottom_y'):
                 value = alignment.document_y(row[key])
                 row[key] = int(value) if float(value).is_integer() else value
+    # The CSV carries the rounded table; the JSON keeps the unrounded fit values.
+    json_records = [dict(row, top_depth=row.get('top_depth_exact', row['top_depth']),
+                         base_depth=row.get('base_depth_exact', row['base_depth']))
+                    for row in records]
     extra = list(dict.fromkeys(key for row in records for key in row if key not in REQUIRED))
     with (output / f'{stem}.csv').open('w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=REQUIRED + extra)
         writer.writeheader()
         writer.writerows(records)
-    data = dict(intervals=records, clusters=list(clusters), calibration=calibration.to_dict(),
+    data = dict(intervals=json_records, clusters=list(clusters), calibration=calibration.to_dict(),
                 alignment=asdict(alignment), warnings=list(warnings),
                 coordinate_system=('top_y/bottom_y are original-document half-open pixel edges; '
                                    'crop_*_y are local to the interpreted-lithology crop'
                                    if coordinate_system == 'document' else
                                    'top_y/bottom_y are crop-local half-open pixel edges; '
-                                   'document_*_y are original-image edges when geometry is known'))
+                                   'document_*_y are original-image edges when geometry is known'),
+                depth_rounding=depth_rounding)
     (output / f'{stem}.json').write_text(json.dumps(data, indent=2))
     overlay = Image.new('RGB', (image.width + 400, image.height), 'white')
     overlay.paste(image, (0, 0))
@@ -185,7 +213,7 @@ def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCali
         if bottom - top >= 28:
             extrapolated = ' [extrapolated]' if row['depth_extrapolated'] else ''
             draw.text((image.width + 15, top + 15),
-                      f"{row['top_depth']:.2f} - {row['base_depth']:.2f} "
+                      f"{format_depth(row['top_depth'])} - {format_depth(row['base_depth'])} "
                       f"{row['depth_unit']}{extrapolated}", fill=color)
     overlay.save(output / f'{stem}.png')
 
@@ -203,6 +231,8 @@ def main() -> None:
     parser.add_argument('--depth-scale', type=float, default=1, help='depth pixels per original-image pixel')
     parser.add_argument('--assume-aligned', action='store_true', help='explicitly assume crops have identical vertical coordinates')
     parser.add_argument('--depth-unit', default='unspecified', help='e.g. ft or m; never inferred from the numeric labels')
+    parser.add_argument('--depth-rounding', type=float, default=10,
+                        help='round exported depths to the nearest N units; 0 keeps full precision')
     parser.add_argument('--depth-samples', type=int, default=12)
     parser.add_argument('--depth-rotation', choices=['auto', '0', '90', '270'], default='auto')
     parser.add_argument('--depth-label-mode', choices=['auto', 'integer', 'decimal', 'all'], default='auto')
@@ -281,13 +311,14 @@ def main() -> None:
                                  min_match_margin=args.min_match_margin, margin=args.margin)
         rows, clusters = [asdict(row) for row in result.intervals], result.clusters
         warnings.extend(result.warnings)
-    final = attach_depths(rows, calibration, alignment, column.height, depth_unit=args.depth_unit)
+    final = attach_depths(rows, calibration, alignment, column.height, depth_unit=args.depth_unit,
+                          depth_rounding=args.depth_rounding)
     warnings.extend(calibration.warnings)
     extrapolated = sum(row['depth_extrapolated'] for row in final)
     if extrapolated:
         warnings.append(f'{extrapolated} intervals extend beyond accepted depth anchors; linear extrapolation is flagged.')
     write_final(final, column, calibration, alignment, args.output, args.column.stem,
-                warnings=warnings, clusters=clusters)
+                warnings=warnings, clusters=clusters, depth_rounding=args.depth_rounding)
     save_calibration(calibration, depth_path, args.output / f'{args.column.stem}_depth')
     print(f'{len(final)} final intervals; {len(set(r["cluster_id"] for r in final))} clusters; '
           f'{len(calibration.anchors)} depth anchors; depth/pixel={calibration.slope:.8g}; '

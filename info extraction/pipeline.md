@@ -135,6 +135,12 @@ A type can be `unknown` while its interval still has valid depth values.
 Units default to `unspecified`; use `--depth-unit ft` or `--depth-unit m` only when
 known from the document. No implicit feet/metres conversion is performed.
 
+Exported depths are rounded half-up to the nearest **10** units by default. Use
+`--depth-rounding N` to change the step (`0` keeps full precision). Rounding hides
+sub-unit fit error, so `top_depth_exact`/`base_depth_exact` retain the unrounded
+values in the CSV, and `intervals.json` reports the unrounded depths alongside
+`depth_rounding`.
+
 ## Failure handling, review, and reruns
 
 - Every run records `run.json`: `completed`, `completed_with_warnings`, or
@@ -164,7 +170,7 @@ Detection/matching options remain available: `--window`, `--min-interval`,
 `--boundary-threshold`, `--color-threshold`, `--refine-radius`, `--margin`,
 `--cluster-threshold`, `--max-match-distance`,
 `--min-match-margin`, `--depth-samples`, `--depth-rotation`, `--depth-label-mode`,
-and `--model`. See `--help` and the individual stage guides for details.
+`--depth-rounding`, and `--model`. See `--help` and the individual stage guides for details.
 
 ## Python API
 
