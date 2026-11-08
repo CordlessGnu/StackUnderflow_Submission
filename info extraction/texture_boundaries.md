@@ -169,7 +169,7 @@ localization ground truth.
 python -B -m unittest discover -s tests -v
 ```
 
-The suite contains **90 tests**, including 19 new refinement tests: 17 synthetic
+The expanded suite contains **125 tests**, including 19 boundary-refinement tests: 17 synthetic
 checks and two optional local-crop checks. Real-crop tests are skipped in bare CI
 without the supplied images. Synthetic coverage includes 2–30 pixel colour beds,
 window changes, contacts near image edges, multiple short beds, grid rules,
@@ -195,5 +195,6 @@ Remaining limitations:
   annotation and precision/recall versus bed thickness remain future work.
 
 No clustering, legend matching or depth calibration is performed in this module;
-those remain separate pipeline stages. The legacy detector is preserved under
+those remain separate pipeline stages. A correctly detected thin colour bed may
+still lack enough texture context for the hybrid matcher to name it confidently. The legacy detector is preserved under
 `wastebin/info extraction/` and is not imported.

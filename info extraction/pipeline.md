@@ -60,7 +60,9 @@ Optional width/height metadata must match the selected TIFF page.
 2. **Detect interval boundaries** with multiscale texture proposals, independent
    short-context colour contacts, local refinement, and split/merge verification.
 3. **Extract legend swatches and OCR names** with the supplied YOLO model.
-4. **Cluster and name intervals**, reusing document-local IDs for returning patterns.
+4. **Cluster and name intervals** using cached descriptor shortlists plus bounded,
+   phase-tolerant seam verification; reuse document-local IDs for confirmed
+   returning patterns and keep insufficient evidence explicitly uncertain.
 5. **OCR and calibrate depth**, checking multiple labels across the depth crop.
 6. **Export the final table and annotated column**, accounting for differing crop origins.
 
@@ -130,7 +132,20 @@ top_y,bottom_y,cluster_id,lithology,top_depth,base_depth
 Extra columns preserve matching distance, distinct-name margin, runner-up, and
 status, plus depth units, extrapolation flags, and alternate pixel coordinates.
 Distances and margins are diagnostic scores, **not calibrated probabilities**.
-A type can be `unknown` while its interval still has valid depth values.
+If an original type decision is `unknown`, its public `lithology` label is now
+replaced with the nonempty `runner_up`. Rows are marked `lithology_fallback=True`;
+`match_status` and original scores remain unchanged. `fallback_distance` records
+the second candidate's score when available. Without a usable runner-up, the
+label remains `unknown`. **Blank-status rows are exempt:** their `lithology`
+cell stays empty, even if an older export supplied a fallback. Fallback labels
+must not be interpreted as verified geological identification.
+`run.json` distinguishes `named_intervals`, `verified_intervals`,
+`fallback_intervals`, `blank_intervals`, and `unknown_intervals`; blanks are not
+counted as named or unknown lithologies.
+The default hybrid matcher adds grouping/seam statuses and scores; diagnostics
+and comparison counts are retained in final JSON and `run.json`. See
+`interval_lithology.md` for score meanings and the more-conservative assignment
+behavior on short or ambiguous intervals.
 
 Units default to `unspecified`; use `--depth-unit ft` or `--depth-unit m` only when
 known from the document. No implicit feet/metres conversion is performed.
@@ -171,6 +186,11 @@ Detection/matching options remain available: `--window`, `--min-interval`,
 `--cluster-threshold`, `--max-match-distance`,
 `--min-match-margin`, `--depth-samples`, `--depth-rotation`, `--depth-label-mode`,
 `--depth-rounding`, and `--model`. See `--help` and the individual stage guides for details.
+and `--model`. Matching also accepts **`--matcher hybrid|descriptor`** (default
+hybrid), `--shortlist-size` (3), `--max-representatives` (3), and
+`--seam-threshold` (0.20). Descriptor mode retains the earlier baseline; increasing
+verification thresholds is not evidence of better accuracy. See `--help` and the
+individual stage guides for details.
 
 ## Python API
 
@@ -195,8 +215,8 @@ print(result.csv_path, result.interval_count, result.cluster_count)
 python -B -m unittest discover -s tests -v
 ```
 
-All **90 tests** pass: the original 71 pipeline/stage regressions plus 19 thin-bed
-and boundary-refinement tests (two require optional local development crops).
+All **125 tests** pass, including runner-up fallback, the blank-status exception,
+and clearing of fallback labels in cached exports. Two boundary checks require optional local development crops.
 Integration tests exercise actual TIFF cropping, boundary detection,
 clustering, crop-to-document coordinate conversion, depth joining, export,
 non-destructive reruns and failure handling; expensive OCR/model calls are mocked
@@ -218,7 +238,10 @@ scripts**, before the subsequent thin-bed boundary refinement:
 Current refined GB506 and Hadrian complete runs are saved under
 `crops/boundary_refinement/gb506_pipeline/` and `hadrian_pipeline/`. See
 `texture_boundaries.md` for the focused colour-contact comparisons and unchanged
-log05 regression control. The minimum interval spacing now defaults to 2 pixels,
+log05 regression control. Hybrid-versus-descriptor reviews are under
+`crops/hybrid_matching/`, including a complete hybrid GB506 run whose boundaries
+and depths are unchanged. These matcher comparisons are not accuracy scores.
+The minimum interval spacing now defaults to 2 pixels,
 independently of texture context; effective scales/settings are recorded in `run.json`.
 
 These are smoke/integration checks and assignment counts, **not measured boundary,
@@ -234,7 +257,8 @@ Only active modules and their stage guides remain in `info extraction/`:
 |---|---|
 | `pipeline.py` | Two-input orchestration, native cropping, provenance and failure handling |
 | `texture_boundaries.py` | RGB/texture boundary detection |
-| `interval_lithology.py` | Visual grouping, legend swatch extraction and naming |
+| `interval_lithology.py` | Hybrid visual grouping, swatch extraction and naming |
+| `texture_seam.py` | Cached, phase-tolerant multiscale seam verification |
 | `legend_utils.py` | Shared OCR, box pairing and name filtering |
 | `depth_distance.py` | Depth OCR and robust affine calibration |
 | `final_output.py` | Crop alignment, depth joining and final export |

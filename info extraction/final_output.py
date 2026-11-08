@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw
 
 from depth_distance import (DepthCalibration, calibrate_depth_column,
                              load_calibration, save_calibration)
-from interval_lithology import (_open_rgb, extract_legend, label_intervals,
+from interval_lithology import (apply_runner_up_fallback, _open_rgb, extract_legend, label_intervals,
                                 load_swatch_manifest, save_swatch_manifest)
 from texture_boundaries import detect_boundaries
 
@@ -108,8 +108,9 @@ def read_labelled_csv(path: str | Path) -> list[dict]:
         rows = list(reader)
     for row in rows:
         row['top_y'], row['bottom_y'] = int(row['top_y']), int(row['bottom_y'])
-        if not row['cluster_id'] or not row['lithology']:
-            raise ValueError('Every interval needs a cluster_id and lithology (unknown is allowed)')
+        blank = str(row.get('match_status', '')).strip().casefold() == 'blank'
+        if not row['cluster_id'] or (not row['lithology'] and not blank):
+            raise ValueError('Every interval needs a cluster_id and lithology; empty labels are allowed for blank status')
     return rows
 
 
@@ -140,7 +141,7 @@ def attach_depths(rows: Sequence[dict], calibration: DepthCalibration,
     output = []
     previous_end = 0
     for original in rows:
-        row = dict(original)
+        row = apply_runner_up_fallback(original)
         top, bottom = row['top_y'], row['bottom_y']
         if (not isinstance(top, (int, np.integer)) or not isinstance(bottom, (int, np.integer))
                 or not 0 <= top < bottom <= column_height or top < previous_end):
@@ -165,14 +166,15 @@ def attach_depths(rows: Sequence[dict], calibration: DepthCalibration,
 def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCalibration,
                 alignment: CropAlignment, output: str | Path, stem: str, *,
                 warnings: Sequence[str] = (), clusters: Sequence[dict] = (),
-                coordinate_system: str = 'crop', depth_rounding: float = 10) -> None:
+                coordinate_system: str = 'crop', matching_diagnostics: dict | None = None, depth_rounding: float = 10) -> None:
     if coordinate_system not in ('crop', 'document'):
         raise ValueError('coordinate_system must be crop or document')
     if coordinate_system == 'document' and not alignment.document_coordinates_known:
         raise ValueError('Document coordinates require known crop geometry')
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    records = [dict(row) for row in rows]
+    local_rows = [apply_runner_up_fallback(row) for row in rows]
+    records = [dict(row) for row in local_rows]
     if coordinate_system == 'document':
         for row in records:
             row['crop_top_y'], row['crop_bottom_y'] = row['top_y'], row['bottom_y']
@@ -188,8 +190,12 @@ def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCali
         writer = csv.DictWriter(f, fieldnames=REQUIRED + extra)
         writer.writeheader()
         writer.writerows(records)
-    data = dict(intervals=json_records, clusters=list(clusters), calibration=calibration.to_dict(),
+    diagnostics = dict(matching_diagnostics or {})
+    diagnostics['runner_up_fallback_intervals'] = sum(r['lithology_fallback'] for r in local_rows)
+    data = dict(intervals=records, clusters=[apply_runner_up_fallback(c) for c in clusters],
+                calibration=calibration.to_dict(),
                 alignment=asdict(alignment), warnings=list(warnings),
+                matching_diagnostics=diagnostics,
                 coordinate_system=('top_y/bottom_y are original-document half-open pixel edges; '
                                    'crop_*_y are local to the interpreted-lithology crop'
                                    if coordinate_system == 'document' else
@@ -200,7 +206,7 @@ def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCali
     overlay = Image.new('RGB', (image.width + 400, image.height), 'white')
     overlay.paste(image, (0, 0))
     draw = ImageDraw.Draw(overlay)
-    for row in rows:
+    for row in local_rows:
         cluster_id = str(row['cluster_id'])
         index = (int(cluster_id[1:]) if cluster_id.startswith('C') and cluster_id[1:].isdigit()
                  else int(hashlib.sha256(cluster_id.encode()).hexdigest()[:8], 16))
@@ -209,7 +215,8 @@ def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCali
         draw.line((0, top, overlay.width, top), fill=color, width=2)
         draw.rectangle((image.width, top, image.width + 8, bottom - 1), fill=color)
         if bottom - top >= 14:
-            draw.text((image.width + 15, top + 2), f"{cluster_id}  {row['lithology']}", fill=color)
+            suffix = ' [runner-up]' if row['lithology_fallback'] else ''
+            draw.text((image.width + 15, top + 2), f"{cluster_id}  {row['lithology']}{suffix}", fill=color)
         if bottom - top >= 28:
             extrapolated = ' [extrapolated]' if row['depth_extrapolated'] else ''
             draw.text((image.width + 15, top + 15),
@@ -250,11 +257,16 @@ def main() -> None:
     parser.add_argument('--cluster-threshold', type=float, default=0.20)
     parser.add_argument('--max-match-distance', type=float, default=0.32)
     parser.add_argument('--min-match-margin', type=float, default=0.06)
+    parser.add_argument('--matcher', choices=['hybrid', 'descriptor'], default='hybrid')
+    parser.add_argument('--shortlist-size', type=int, default=3)
+    parser.add_argument('--max-representatives', type=int, default=3)
+    parser.add_argument('--seam-threshold', type=float, default=0.20)
     args = parser.parse_args()
     column = _open_rgb(args.column)
     depth_path = args.depth_column or args.column.parent.parent / 'depth_column' / args.column.name
     depth_image = _open_rgb(depth_path)
     warnings, clusters = [], []
+    matching_diagnostics = {}
     explicit = args.column_top is not None or args.depth_top is not None
     if explicit:
         if args.column_top is None or args.depth_top is None:
@@ -290,6 +302,7 @@ def main() -> None:
                                       for row, saved in zip(rows, saved_rows)))
                 if consistent:
                     clusters = details.get('clusters', [])
+                    matching_diagnostics = details.get('diagnostics', details.get('matching_diagnostics', {}))
                     warnings.extend(details.get('warnings', []))
                 else:
                     warnings.append('Classification JSON differs from CSV; stale sidecar metadata ignored.')
@@ -308,8 +321,11 @@ def main() -> None:
             save_swatch_manifest(swatches, args.output / f'{args.column.stem}_legend', legend_warnings)
         result = label_intervals(column, boundaries, swatches, cluster_threshold=args.cluster_threshold,
                                  max_match_distance=args.max_match_distance,
-                                 min_match_margin=args.min_match_margin, margin=args.margin)
+                                 min_match_margin=args.min_match_margin, margin=args.margin,
+                                 matcher=args.matcher, shortlist_size=args.shortlist_size,
+                                 max_representatives=args.max_representatives, seam_threshold=args.seam_threshold)
         rows, clusters = [asdict(row) for row in result.intervals], result.clusters
+        matching_diagnostics = result.diagnostics
         warnings.extend(result.warnings)
     final = attach_depths(rows, calibration, alignment, column.height, depth_unit=args.depth_unit,
                           depth_rounding=args.depth_rounding)
@@ -318,9 +334,11 @@ def main() -> None:
     if extrapolated:
         warnings.append(f'{extrapolated} intervals extend beyond accepted depth anchors; linear extrapolation is flagged.')
     write_final(final, column, calibration, alignment, args.output, args.column.stem,
-                warnings=warnings, clusters=clusters, depth_rounding=args.depth_rounding)
+                warnings=warnings, clusters=clusters, matching_diagnostics=matching_diagnostics, depth_rounding=args.depth_rounding)
     save_calibration(calibration, depth_path, args.output / f'{args.column.stem}_depth')
+    fallback_count = sum(row['lithology_fallback'] for row in final)
     print(f'{len(final)} final intervals; {len(set(r["cluster_id"] for r in final))} clusters; '
+          f'{fallback_count} runner-up fallback labels; '
           f'{len(calibration.anchors)} depth anchors; depth/pixel={calibration.slope:.8g}; '
           f'fit RMSE={calibration.rmse_px:.2f}px; output={args.output}')
     for warning in warnings:

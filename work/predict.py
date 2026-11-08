@@ -4,7 +4,7 @@ Usage (defaults: --tag v0.2-final, --snap xyL, GPU if available else CPU):
   work/.venv/Scripts/python work/predict.py --images page1.tif page2.tif --out-name demo
   work/.venv/Scripts/python work/predict.py --tag v0.2 --split val --snap ""      # raw model, no snapping
   work/.venv/Scripts/python work/predict.py --split test                         # run ONCE, at the end
-Model: work/checkpoints/<tag>/best.pt (or last.pt if there is no best.pt).
+Model: work/checkpoints/<tag>/best.pt (or last.pt), else work/export/boxfinder_<tag>.pt (fresh clone).
 Per page, in work/outputs/<tag>/<split>[_snap_<mode>]/:
   <stem>.json          predicted boxes in original pixels (same format as the supplied JSONs)
   <stem>_boundary.png  model-size page with the predicted boxes drawn
@@ -53,6 +53,8 @@ def main():
 
     ck = WORK / "checkpoints" / a.tag
     ckpt = ck / "best.pt" if (ck / "best.pt").exists() else ck / "last.pt"
+    if not ckpt.exists():  # fresh clone: checkpoints/ is not in git, the exported model is
+        ckpt = WORK / "export" / f"boxfinder_{a.tag}.pt"
     dev = torch.device("cuda" if torch.cuda.is_available() and not a.cpu else "cpu")
     model = UNet().to(dev)
     model.load_state_dict(torch.load(ckpt, map_location=dev)["model"])

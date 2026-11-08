@@ -136,8 +136,39 @@ class DocumentPipelineTests(unittest.TestCase):
         self.assertEqual(manifest['boundary_scales'], [24, 48, 96, 192])
         self.assertEqual(manifest['effective_min_interval'], 2)
         self.assertEqual(manifest['effective_refine_radius'], 24)
+        self.assertEqual(manifest['matching_diagnostics']['matcher'], 'hybrid')
+        final = json.loads((self.output / 'intervals.json').read_text())
+        self.assertEqual(final['matching_diagnostics']['matcher'], 'hybrid')
+        self.assertEqual(final['intervals'][0]['match_seam_status'], 'same')
         self.assertTrue((self.output / 'boundary_color_scores.npy').exists())
         self.assertTrue((self.output / 'classification/intervals.clusters.png').exists())
+
+    def test_runner_up_fallback_is_not_counted_as_a_verified_match(self):
+        self.swatches.append(LegendSwatch('Alternative sandstone', self.swatches[0].image))
+        result = self.run_mocked()
+        manifest = json.loads((self.output / 'run.json').read_text())
+        self.assertEqual(result.fallback_intervals, 2)
+        self.assertEqual(result.matched_intervals, 1)
+        self.assertEqual(manifest['named_intervals'], 3)
+        self.assertEqual(manifest['verified_intervals'], 1)
+        self.assertEqual(manifest['fallback_intervals'], 2)
+        self.assertEqual(manifest['unknown_intervals'], 0)
+        final = json.loads((self.output / 'intervals.json').read_text())
+        self.assertEqual(sum(r['lithology_fallback'] for r in final['intervals']), 2)
+
+    def test_blank_intervals_are_empty_and_counted_separately(self):
+        self.original[40:220, 20:100] = 255
+        Image.fromarray(self.original).save(self.tiff, compression='tiff_lzw')
+        result = self.run_mocked()
+        manifest = json.loads((self.output / 'run.json').read_text())
+        self.assertEqual(result.blank_intervals, 1)
+        self.assertEqual(manifest['blank_intervals'], 1)
+        self.assertEqual(manifest['named_intervals'], 2)
+        self.assertEqual(manifest['unknown_intervals'], 0)
+        rows = json.loads((self.output / 'intervals.json').read_text())['intervals']
+        blank = next(r for r in rows if r['match_status'] == 'blank')
+        self.assertEqual(blank['lithology'], '')
+        self.assertFalse(blank['lithology_fallback'])
 
     def test_crop_coordinate_export_is_available(self):
         self.run_mocked(coordinate_system='crop')
@@ -223,7 +254,8 @@ class DocumentPipelineTests(unittest.TestCase):
         for kwargs in [dict(window=0), dict(min_interval=0), dict(margin=0.5), dict(page=-1),
                        dict(depth_samples=1), dict(coordinate_system='invalid'),
                        dict(boundary_threshold=float('nan')), dict(color_threshold=0),
-                       dict(refine_radius=-1)]:
+                       dict(refine_radius=-1), dict(matcher='invalid'), dict(shortlist_size=0),
+                       dict(max_representatives=0), dict(seam_threshold=0)]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 PipelineConfig(**kwargs)
 

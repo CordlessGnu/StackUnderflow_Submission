@@ -75,7 +75,8 @@ class IntervalLithologyTests(unittest.TestCase):
     def test_identical_swatches_different_names_are_ambiguous(self):
         legend = [LegendSwatch('Clay', self.sand), LegendSwatch('Shale', self.sand.copy())]
         result = label_intervals(self.sand, [(0, 180)], legend)
-        self.assertEqual(result.intervals[0].lithology, 'unknown')
+        self.assertEqual(result.intervals[0].lithology, result.intervals[0].runner_up)
+        self.assertTrue(result.intervals[0].lithology_fallback)
         self.assertEqual(result.intervals[0].match_status, 'ambiguous')
         self.assertAlmostEqual(result.intervals[0].match_margin, 0)
 
@@ -84,11 +85,12 @@ class IntervalLithologyTests(unittest.TestCase):
         self.assertEqual(result.intervals[0].lithology, 'unknown')
         self.assertEqual(result.intervals[0].match_status, 'poor_match')
 
-    def test_blank_is_not_assigned_a_rock(self):
+    def test_blank_status_prevents_runner_up_label_fallback(self):
         blank = Image.new('RGB', (80, 180), 'white')
         result = label_intervals(blank, [(0, 180)], self.legend)
         self.assertEqual(result.intervals[0].match_status, 'blank')
-        self.assertEqual(result.intervals[0].lithology, 'unknown')
+        self.assertEqual(result.intervals[0].lithology, '')
+        self.assertFalse(result.intervals[0].lithology_fallback)
 
     def test_without_legend_clustering_still_works(self):
         result = label_intervals(self.column([self.sand, self.sand]), [(0, 180), (180, 360)], [])

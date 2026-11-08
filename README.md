@@ -23,11 +23,16 @@ and start again without deleting previous results.
 
 - [Complete pipeline usage and output format](info%20extraction/pipeline.md)
 - [RGB interval boundary detection](info%20extraction/texture_boundaries.md)
-- [Interval clustering and lithology identification](info%20extraction/interval_lithology.md)
+- [Hybrid grouping and legend matching](info%20extraction/interval_lithology.md)
 - [Depth calibration and cropped-input export](info%20extraction/final_output.md)
 
 Superseded utilities were preserved in [`wastebin/`](wastebin/README.md).
-The active pipeline follows `Flow Diagram.drawio`.
+The active pipeline follows `Flow Diagram.drawio`. Grouping/naming now defaults
+to cached descriptor shortlists plus multiscale seam verification. Use
+`--matcher descriptor` for the earlier comparison method. Nonblank unknown labels
+use the nonempty runner-up, marked `lithology_fallback=True`; original match
+statuses remain available. Rows with `match_status=blank` keep an empty
+`lithology` cell and never receive a runner-up label.
 
 ```bash
 python -B -m unittest discover -s tests -v

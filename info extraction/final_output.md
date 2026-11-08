@@ -162,8 +162,18 @@ sub-unit fit error, so the unrounded values are kept as `top_depth_exact` /
 `base_depth_exact` in the CSV and as `top_depth`/`base_depth` in the JSON. The
 annotated PNG uses the same rounded values as the CSV.
 
-**Confidence:** lithology distance/margin/status are retained, not represented as
-calibrated probabilities. Calibration RMSE is reported in depth-crop pixels in
+**Runner-up fallback:** unknown labels are replaced with their nonempty runner-up,
+including when reusing older classification CSVs, **except** rows whose
+`match_status` is `blank`: their lithology cell remains empty and fallback flags
+are cleared. CSV/JSON and annotated images use the applicable label;
+`lithology_fallback=True` marks nonblank replacements. Original match statuses
+and scores are retained, and `fallback_distance` gives the second candidate's
+score when recoverable. No runner-up leaves `unknown` unchanged.
+
+**Confidence:** lithology distance/margin/status and hybrid grouping/seam evidence
+are retained, not represented as calibrated probabilities. The default matcher is
+`hybrid`; `--matcher descriptor` selects the earlier baseline. The matching
+controls and uncertainty statuses are documented in `interval_lithology.md`. Calibration RMSE is reported in depth-crop pixels in
 JSON. It measures agreement with recognized label centres, not absolute depth
 accuracy or boundary accuracy. Text/tick alignment can introduce systematic
 bias even with a small fit residual.
@@ -205,4 +215,5 @@ Remaining limits:
 - Multiple integer depth tracks, unusual numeric formatting, or OCR errors can
   require explicit track selection or a reviewed calibration.
 - Lithology/boundary limitations remain unchanged: symbols can cause false cuts,
-  legend detections can be missing, and ambiguous lithologies remain `unknown`.
+  legend detections can be missing, and fallback names do not resolve the
+  original ambiguity. Without a usable runner-up, labels remain `unknown`.
