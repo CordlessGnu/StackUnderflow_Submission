@@ -21,19 +21,36 @@ CSV = (b'top_y,bottom_y,cluster_id,lithology,top_depth,base_depth,match_status,l
        b'20,30,C003,Shale,20,30,matched,False\n')
 
 
+UNET_BOXES = {'depth_column': [1, 2, 3, 4], 'interpreted_lithology_column': [5, 6, 7, 8],
+              'lithology_legend': [9, 10, 11, 12]}
+
+
 class CompleteManager:
     def __init__(self, output):
         self.output = output
         self.calls = []
+        self.unet_calls = []
+        self.unet = False
     def active_job(self): return None
     def start_paths(self, tiff, annotation, output, options):
         self.calls.append((tiff, annotation, output, options))
         return 'demo-job'
+    def start_tiff_path(self, tiff, output, options):
+        self.unet_calls.append(('path', tiff, output, options)); self.unet = True
+        return 'demo-job'
+    def start_tiff_upload(self, name, stream, output, options):
+        self.unet_calls.append(('upload', name, output, options)); self.unet = True
+        return 'demo-job'
     def snapshot(self, job_id):
+        manifest = {'verified_intervals': 1, 'fallback_intervals': 1, 'blank_intervals': 1,
+                    'warnings': ['Example warning']}
+        validation = {}
+        if self.unet:
+            manifest['box_source'] = {'method': 'unet', 'version': 'v0.2', 'snap_mode': 'xyL', 'seconds': 2.5,
+                                      'device': 'cpu', 'bounding_boxes': UNET_BOXES, 'preview': 'predicted_boxes.png'}
+            validation = {'width': 60, 'height': 300, 'bounding_boxes': None, 'box_source': 'unet'}
         return JobSnapshot(job_id, 'Example.tiff', self.output, 'succeeded', 'Completed', 1,
-                           'Complete', {'verified_intervals': 1, 'fallback_intervals': 1,
-                                        'blank_intervals': 1, 'warnings': ['Example warning']},
-                           'Completed local pipeline', 1, {})
+                           'Complete', manifest, 'Completed local pipeline', 1, validation)
 
 
 @pytest.fixture
@@ -96,6 +113,63 @@ def test_successful_run_automatically_enters_existing_analytics(completed, tmp_p
     app.button(key='extraction_add_demo-job').click().run()
     assert not app.exception
     assert len(app.session_state['document_collection']) == 1
+
+
+TIFF_ONLY = 'TIFF only (U-Net boxes)'
+
+
+def test_tiff_only_mode_hides_json_inputs(completed):
+    app = AppTest.from_file(str(APP), default_timeout=20).run()
+    assert TIFF_ONLY in app.radio(key='single_input_mode').options
+    app.radio(key='single_input_mode').set_value(TIFF_ONLY).run()
+    assert not app.exception
+    assert app.text_input(key='extraction_tiff_path')
+    assert app.text_input(key='extraction_output_root')
+    keys = {widget.key for widget in app.text_input}
+    assert 'extraction_annotation_path' not in keys
+    app.radio(key='extraction_file_method').set_value('Upload files').run()
+    assert not app.exception
+    app.button(key='extraction_start').click().run()
+    assert any('Select the TIFF file' in e.value for e in app.error)
+    assert completed.unet_calls == [] and completed.calls == []
+
+
+def test_tiff_only_run_uses_unet_and_enters_existing_analytics(completed, tmp_path):
+    (completed.output / 'predicted_boxes.png').write_bytes(_png())
+    app = AppTest.from_file(str(APP), default_timeout=20).run()
+    app.radio(key='single_input_mode').set_value(TIFF_ONLY).run()
+    app.text_input(key='extraction_tiff_path').set_value('/local/document.tiff')
+    app.text_input(key='extraction_output_root').set_value(str(tmp_path / 'chosen directory'))
+    app.number_input(key='extraction_depth_rounding').set_value(0.0)
+    app.button(key='extraction_start').click().run()
+    assert not app.exception
+    assert completed.calls == []  # never the TIFF + JSON entry point
+    kind, tiff, output, options = completed.unet_calls[0]
+    assert (kind, tiff, output) == ('path', '/local/document.tiff', str(tmp_path / 'chosen directory'))
+    assert options.depth_rounding == 0
+    record = app.session_state['single_document']
+    assert record.interval_count == 3 and record.document_id == 'extraction_demo-job'
+    assert any('Extraction complete' in msg.value for msg in app.success)
+    assert any(e.label == 'Predicted bounding boxes (U-Net)' for e in app.expander)
+    assert any('lithology_legend' in str(j.value) for j in app.json)  # the predicted boxes are shown
+    assert len(app.get('plotly_chart')) > 0
+
+
+def test_switching_modes_keeps_csv_and_tiff_json_paths_working(completed, tmp_path):
+    app = AppTest.from_file(str(APP), default_timeout=20).run()
+    app.radio(key='single_input_mode').set_value(TIFF_ONLY).run()
+    app.radio(key='single_input_mode').set_value('TIFF + JSON').run()
+    assert not app.exception
+    assert app.text_input(key='extraction_annotation_path')
+    app.radio(key='single_input_mode').set_value('Extraction CSV').run()
+    assert not app.exception
+
+
+def _png() -> bytes:
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new('RGB', (20, 80), 'white').save(buffer, format='PNG')
+    return buffer.getvalue()
 
 
 def test_native_directory_picker_updates_the_path_field(completed, monkeypatch, tmp_path):

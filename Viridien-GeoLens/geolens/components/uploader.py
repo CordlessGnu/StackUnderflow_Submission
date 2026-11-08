@@ -61,13 +61,21 @@ def clear_collection() -> None:
     st.session_state[COLLECTION_KEY] = DocumentCollection()
 
 
+CSV_MODE = 'Extraction CSV'
+TIFF_JSON_MODE = 'TIFF + JSON'
+TIFF_ONLY_MODE = 'TIFF only (U-Net boxes)'
+EXTRACTION_MODES = (TIFF_JSON_MODE, TIFF_ONLY_MODE)
+
+
 def render_single_upload() -> DocumentRecord | None:
-    """Choose an existing CSV or run extraction and reuse the same analytics."""
-    mode = st.radio('Input source', ['Extraction CSV', 'TIFF + JSON'], horizontal=True,
+    """Choose an existing CSV or run extraction and reuse the same analytics.
+
+    TIFF only: the U-Net predicts the three bounding boxes, then the same pipeline runs."""
+    mode = st.radio('Input source', [CSV_MODE, TIFF_JSON_MODE, TIFF_ONLY_MODE], horizontal=True,
                     key='single_input_mode')
-    if mode == 'TIFF + JSON':
+    if mode in EXTRACTION_MODES:
         from geolens.components.extraction import render_tiff_upload
-        record = render_tiff_upload()
+        record = render_tiff_upload(auto_boxes=mode == TIFF_ONLY_MODE)
         set_single_document(record)
         return record
     return _render_single_csv_upload()

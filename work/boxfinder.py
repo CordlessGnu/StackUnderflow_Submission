@@ -33,18 +33,29 @@ class BoxFinder:
         self.model.load_state_dict(ck["model"])
         self.model.eval()
 
-    def predict(self, image_path, snap=True, return_probs=False):
+    def predict(self, image_path, snap=True, return_probs=False, cache=True):
         """Boxes for one page. snap=True moves edges onto printed lines in the full-res scan
         (slower on the first run of a page: the scan is decoded once and cached in work/cache/)."""
+        d = self.detect(image_path, snap=snap, cache=cache)
+        return (d["boxes"], d["probs"]) if return_probs else d["boxes"]
+
+    def detect(self, image_path, snap=True, cache=True):
+        """Like predict, but returns everything: {"boxes" (final), "raw_boxes" (before
+        snapping), "probs", "page" (model-size RGB page), "width", "height"}.
+        cache=False: do not read or write work/cache (use for pages from outside the dataset)."""
         p = Path(image_path).resolve()
-        w, h = Image.open(p).size
-        page = load_resized(p, p.stem, w, h)
+        with Image.open(p) as im:
+            w, h = im.size
+        page = load_resized(p, p.stem, w, h, cache=cache)
         prob = predict_probs(self.model, page, self.dev)
-        boxes = probs_to_boxes(prob, w, h, thr=self.meta.get("threshold", 0.5))
+        raw = probs_to_boxes(prob, w, h, thr=self.meta.get("threshold", 0.5))
+        boxes = raw
         if snap:
             from refine import ink_mask, snap_boxes
-            boxes = snap_boxes(boxes, ink_mask(p.stem, p), self.meta.get("snap_mode", "xyL"))
-        return (boxes, prob) if return_probs else boxes
+            boxes = snap_boxes(raw, ink_mask(p.stem, p, cache=cache), self.meta.get("snap_mode", "xyL"))
+        return {"boxes": {k: [int(v) for v in b] for k, b in boxes.items()},
+                "raw_boxes": {k: [int(v) for v in b] for k, b in raw.items()},
+                "probs": prob, "page": page, "width": w, "height": h}
 
 
 if __name__ == "__main__":

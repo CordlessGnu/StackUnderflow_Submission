@@ -1,4 +1,4 @@
-"""TIFF + bbox JSON controls, live process progress and CSV analytics handoff."""
+"""TIFF + bbox JSON (or TIFF only, with U-Net boxes) controls, live progress and CSV analytics handoff."""
 from __future__ import annotations
 
 import atexit
@@ -119,25 +119,63 @@ def _render_job(job_id: str) -> None:
             for note in notes:
                 st.warning(str(note))
     if job.validation:
-        with st.expander('Input geometry'):
-            st.caption(f"TIFF: {job.validation['width']} × {job.validation['height']} pixels. Crops are not resized.")
-            st.json(job.validation['bounding_boxes'])
+        _render_geometry(job)
     with st.expander('Worker log', expanded=job.state == 'failed'):
         st.code(job.log_tail or 'Waiting for pipeline output…', language=None)
 
 
-def render_tiff_upload() -> DocumentRecord | None:
-    """Select two files and an output parent, then reuse the existing CSV display."""
+def _render_geometry(job) -> None:
+    """Supplied boxes (TIFF + JSON) or the U-Net's predicted boxes (TIFF only)."""
+    size = f"TIFF: {job.validation['width']} × {job.validation['height']} pixels. Crops are not resized."
+    if job.validation.get('box_source') != 'unet':
+        with st.expander('Input geometry'):
+            st.caption(size)
+            st.json(job.validation['bounding_boxes'])
+        return
+    source = job.manifest.get('box_source') or {}
+    with st.expander('Predicted bounding boxes (U-Net)', expanded=job.state == 'succeeded'):
+        st.caption(size)
+        if not source.get('bounding_boxes'):
+            st.caption('The U-Net boxes appear here once region detection has finished.')
+            return
+        st.caption(f"Model {source.get('version') or 'U-Net'} · edge snapping "
+                   f"{source.get('snap_mode') or 'off'} · {source.get('seconds', 0):.1f}s on {source.get('device', '?')}. "
+                   'Boxes are predicted from the image alone: check that each one sits on the right region, '
+                   'because an unfamiliar layout can make the model pick the wrong column.')
+        left, right = st.columns([1, 2])
+        preview = job.output_dir / str(source.get('preview') or 'predicted_boxes.png')
+        with left:
+            if preview.is_file():
+                try:
+                    st.image(_artifact_bytes(str(preview), preview.stat().st_mtime_ns),
+                             caption='Blue depth · pink lithology · green legend', width='stretch')
+                except OSError:
+                    st.caption('Preview image is no longer available.')
+        with right:
+            st.json(source['bounding_boxes'])
+
+
+def render_tiff_upload(auto_boxes: bool = False) -> DocumentRecord | None:
+    """Select the TIFF (+ JSON unless auto_boxes) and an output parent, then reuse the CSV display.
+
+    auto_boxes=True: no JSON; the U-Net predicts the three boxes before the same pipeline runs."""
     st.markdown('<div class="gl-panel-title">Extract from a local document</div>', unsafe_allow_html=True)
-    st.caption('Run the connected pipeline, then analyse its CSV here. Only one extraction runs at a time.')
-    method = st.radio('TIFF/JSON selection', ['Local file paths', 'Upload files'], horizontal=True,
-                      key='extraction_file_method')
+    if auto_boxes:
+        st.caption('TIFF only: the U-Net finds the depth column, lithology column and legend, then the same '
+                   'pipeline runs on those boxes. Only one extraction runs at a time.')
+    else:
+        st.caption('Run the connected pipeline, then analyse its CSV here. Only one extraction runs at a time.')
+    method = st.radio('TIFF selection' if auto_boxes else 'TIFF/JSON selection', ['Local file paths', 'Upload files'],
+                      horizontal=True, key='extraction_file_method')
     tiff_upload = annotation_upload = None
     tiff_path = annotation_path = ''
     if method == 'Local file paths':
         tiff_path = _path_control('TIFF document path', 'extraction_tiff_path', 'tiff')
-        annotation_path = _path_control('Bounding-box JSON path', 'extraction_annotation_path', 'json')
+        if not auto_boxes:
+            annotation_path = _path_control('Bounding-box JSON path', 'extraction_annotation_path', 'json')
         st.caption('Recommended for large TIFFs: no browser copy. Relative paths are resolved from the repository root.')
+    elif auto_boxes:
+        tiff_upload = st.file_uploader('TIFF document', type=['tif', 'tiff'], key='extraction_tiff_upload')
     else:
         left, right = st.columns(2)
         with left:
@@ -184,7 +222,13 @@ def render_tiff_upload() -> DocumentRecord | None:
                                     min_interval=int(minimum), window=None if automatic else int(window),
                                     legend_manifest=legend, calibration=calibration)
         try:
-            if method == 'Upload files':
+            if auto_boxes and method == 'Upload files':
+                if tiff_upload is None:
+                    raise ExtractionError('Select the TIFF file.')
+                job_id = manager.start_tiff_upload(tiff_upload.name, tiff_upload, output, options)
+            elif auto_boxes:
+                job_id = manager.start_tiff_path(tiff_path, output, options)
+            elif method == 'Upload files':
                 if tiff_upload is None or annotation_upload is None:
                     raise ExtractionError('Select both the TIFF and bounding-box JSON files.')
                 job_id = manager.start_uploads(tiff_upload.name, tiff_upload, annotation_upload.name,

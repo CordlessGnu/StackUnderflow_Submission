@@ -4,7 +4,7 @@ GeoLens turns automated lithology extraction outputs (structured CSVs) into inte
 
 It lets geoscientists analyse a single document, compare an entire collection, and export traceable data and reports without manually opening each CSV.
 
-> GeoLens can consume existing CSVs or run this repository's extraction pipeline locally from TIFF + bbox JSON inputs. It does not retrain models or claim that predictions are geologically correct.
+> GeoLens can consume existing CSVs or run this repository's extraction pipeline locally from TIFF + bbox JSON inputs, or from a TIFF alone (the U-Net predicts the boxes). It does not retrain models or claim that predictions are geologically correct.
 
 ---
 
@@ -67,6 +67,23 @@ In **Single Analysis**, select **Input source → TIFF + JSON**:
 5. On success the final `intervals.csv` automatically enters the **existing**
    profile, filters, statistics, quality checks and interval tables. Use **Add
    this extraction to collection** for Batch Analysis and Comparison Studio.
+
+### Local extraction: TIFF only (U-Net boxes)
+
+Select **Input source → TIFF only (U-Net boxes)** when there is no bounding-box
+JSON. Choose the TIFF by path or upload, an output directory and the same
+settings as above, then **Run extraction**. The worker
+(`info extraction/unet_pipeline.py`) first runs the bonus U-Net
+(`work/export/boxfinder_v0.2.pt`, see `work/README.md`) to predict the depth
+column, interpreted lithology column and lithology legend, snaps their edges to
+the printed lines, writes them as a normal bbox JSON, and then runs the unchanged
+six-stage `pipeline.py` on those boxes. The run folder additionally contains
+`predicted_boxes.png`, and `run.json` gains a `box_source` entry (model, boxes,
+timing); `annotation.json` holds the predicted boxes. The **Predicted bounding
+boxes (U-Net)** panel shows both, so the boxes can be checked before trusting the
+intervals: on unfamiliar layouts the model can pick the wrong column (see the
+test results in `work/README.md`). This mode needs the U-Net's extra packages
+(`tifffile`, `imagecodecs`, OpenCV), which are in the root `requirements.txt`.
 
 Only one extraction runs per GeoLens server to limit TIFF/model memory usage.
 Navigating to another page does not cancel it; return to Single Analysis to see

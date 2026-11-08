@@ -23,5 +23,11 @@ ultralytics>=8.3.0
 torch>=2.2.0
 torchvision>=0.17.0
 
+# --- Bonus U-Net region finder (work/, used by "TIFF only" extraction) ---
+# Predicts the three bounding boxes from the TIFF; reuses torch from above.
+# OpenCV (cv2) is already installed by ultralytics.
+tifffile>=2024.1.1
+imagecodecs>=2024.1.1
+
 # --- GeoLens local UI and analytics ---
 -r Viridien-GeoLens/requirements.txt

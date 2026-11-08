@@ -33,10 +33,10 @@ H_FRAC = 0.85
 COLUMNS = ("depth_column", "interpreted_lithology_column")
 
 
-def ink_mask(stem, path):
-    """Bool (H, W) ink mask of the original page, cached."""
+def ink_mask(stem, path, cache=True):
+    """Bool (H, W) ink mask of the original page, cached by stem (cache=False: no cache)."""
     c = WORK / "cache" / "ink" / f"{stem}.npz"
-    if c.exists():
+    if cache and c.exists():
         z = np.load(c)
         return np.unpackbits(z["bits"], axis=1, count=int(z["w"])).astype(bool)
     a = _decode_full(path)
@@ -49,8 +49,9 @@ def ink_mask(stem, path):
     del a
     gc.collect()
     bits = np.concatenate(bits)
-    c.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(c, bits=bits, w=w)
+    if cache:
+        c.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(c, bits=bits, w=w)
     return np.unpackbits(bits, axis=1, count=w).astype(bool)
 
 

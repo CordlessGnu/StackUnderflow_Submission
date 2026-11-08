@@ -10,8 +10,8 @@ import pytest
 from PIL import Image
 
 from geolens.services.extraction_service import (
-    ExtractionError, ExtractionJobManager, ExtractionOptions, REPO_ROOT,
-    resolve_local_path, validate_inputs,
+    ExtractionError, ExtractionJobManager, ExtractionOptions, PIPELINE_SCRIPT, REPO_ROOT,
+    UNET_PIPELINE_SCRIPT, UNET_STAGE, resolve_local_path, validate_inputs,
 )
 
 WORKER = r'''
@@ -187,6 +187,118 @@ def test_options_are_typed_and_do_not_use_shell_interpolation(inputs):
 
 def test_relative_paths_resolve_from_repo_not_streamlit_directory():
     assert resolve_local_path('Dataset/example.tif') == REPO_ROOT / 'Dataset/example.tif'
+
+
+# ---- TIFF only (U-Net boxes) -------------------------------------------------
+UNET_WORKER = r'''
+import argparse, csv, json, sys, time
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument('tiff'); p.add_argument('--output', required=True)
+a, options = p.parse_known_args()
+out = Path(a.output)
+print('U-Net worker started', flush=True)
+if 'wait' in Path(a.tiff).name: time.sleep(60)
+if 'unetfail' in Path(a.tiff).name:
+    out.mkdir(parents=True)
+    (out/'run.json').write_text(json.dumps({'status':'failed', 'error':'U-Net region detection failed: synthetic'}))
+    raise SystemExit(1)
+out.mkdir(parents=True)
+boxes = {'depth_column':[20,0,40,300], 'interpreted_lithology_column':[0,0,20,300], 'lithology_legend':[40,0,60,100]}
+with (out/'intervals.csv').open('w', newline='') as f:
+    w = csv.writer(f)
+    w.writerow(['top_y','bottom_y','cluster_id','lithology','top_depth','base_depth'])
+    w.writerow([0,10,'C001','Shale',0,10])
+manifest = {'status':'completed', 'stages':{'0/6 U-Net region detection':{'status':'complete'}, **{str(i):{'status':'complete'} for i in range(6)}},
+            'box_source':{'method':'unet', 'bounding_boxes':boxes}, 'argv':sys.argv[1:]}
+(out/'run.json').write_text(json.dumps(manifest))
+'''
+
+
+@pytest.fixture
+def unet_manager(tmp_path):
+    pipeline = tmp_path / 'fake pipeline.py'; pipeline.write_text(WORKER)
+    worker = tmp_path / 'fake unet pipeline.py'; worker.write_text(UNET_WORKER)
+    value = ExtractionJobManager(job_root=tmp_path / 'jobs', pipeline_script=pipeline, unet_script=worker)
+    yield value
+    value.shutdown()
+
+
+def tiff_named(tmp_path, name):
+    path = tmp_path / name
+    Image.new('RGB', (60, 300), 'white').save(path, compression='tiff_lzw')
+    return path
+
+
+def test_tiff_only_runs_unet_worker_without_annotation(unet_manager, tmp_path):
+    image = tiff_named(tmp_path, 'well only.tif')
+    options = ExtractionOptions(depth_rounding=0, matcher='descriptor')
+    job_id = unet_manager.start_tiff_path(image, tmp_path / 'out', options)
+    job = finish(unet_manager, job_id)
+    assert job.state == 'succeeded', job.message
+    assert job.validation == {'width': 60, 'height': 300, 'bounding_boxes': None, 'box_source': 'unet'}
+    assert job.manifest['box_source']['method'] == 'unet'
+    request = json.loads((unet_manager.job_root / job_id / 'request.json').read_text())
+    assert request['annotation'] is None and request['box_source'] == 'unet'
+    assert Path(request['command'][3]).name == 'fake unet pipeline.py'
+    assert not any(part.endswith('.json') for part in request['command'])
+    argv = job.manifest['argv']  # the pipeline options reach the worker unchanged
+    assert argv[argv.index('--depth-rounding') + 1] == '0' and argv[argv.index('--matcher') + 1] == 'descriptor'
+    assert job.progress == 1
+
+
+def test_tiff_only_shows_unet_stage_while_waiting_and_blocks_other_jobs(unet_manager, inputs, tmp_path):
+    image = tiff_named(tmp_path, 'wait.tif')
+    job_id = unet_manager.start_tiff_path(image, tmp_path / 'out')
+    job = unet_manager.snapshot(job_id)
+    assert job.state == 'running' and job.stage == UNET_STAGE and job.progress == 0
+    with pytest.raises(ExtractionError, match='already running'):
+        unet_manager.start_paths(inputs[0], inputs[1], tmp_path / 'other')  # one job across both modes
+    unet_manager.cancel(job_id)
+    assert unet_manager.snapshot(job_id).state == 'cancelled'
+
+
+def test_tiff_only_failure_is_not_loaded(unet_manager, tmp_path):
+    job = finish(unet_manager, unet_manager.start_tiff_path(tiff_named(tmp_path, 'unetfail.tif'), tmp_path / 'out'))
+    assert job.state == 'failed'
+    assert 'U-Net region detection failed' in job.message
+
+
+def test_tiff_only_upload_is_staged_safely(unet_manager, tmp_path):
+    image = tiff_named(tmp_path, 'upload.tif')
+    stream = io.BytesIO(image.read_bytes()); stream.seek(5)
+    job_id = unet_manager.start_tiff_upload('C:\\fakepath\\..\\well.tif', stream, tmp_path / 'out')
+    assert stream.tell() == 5
+    assert finish(unet_manager, job_id).state == 'succeeded'
+    request = json.loads((unet_manager.job_root / job_id / 'request.json').read_text())
+    assert Path(request['tiff']).name == 'well.tif'
+    assert unet_manager.job_root in Path(request['tiff']).parents
+
+
+def test_tiff_only_rejects_non_tiff_and_cleans_staging(unet_manager, tmp_path):
+    with pytest.raises(ExtractionError):
+        unet_manager.start_tiff_upload('bad.tif', io.BytesIO(b'not a tiff'), tmp_path / 'out')
+    assert list(unet_manager.job_root.glob('upload_*')) == []
+    png = tmp_path / 'page.tif'; Image.new('RGB', (5, 5)).save(png, format='PNG')
+    with pytest.raises(ExtractionError, match='not TIFF'):
+        unet_manager.start_tiff_path(png, tmp_path / 'out')
+    with pytest.raises(ExtractionError):
+        unet_manager.start_tiff_path(tmp_path / 'missing.tif', tmp_path / 'out')
+    assert unet_manager.active_job() is None
+
+
+def test_tiff_and_json_mode_still_uses_the_normal_pipeline(unet_manager, inputs, tmp_path):
+    image, annotation, _ = inputs
+    job_id = unet_manager.start_paths(image, annotation, tmp_path / 'out')
+    assert finish(unet_manager, job_id).state == 'succeeded'
+    request = json.loads((unet_manager.job_root / job_id / 'request.json').read_text())
+    assert Path(request['command'][3]).name == 'fake pipeline.py'
+    assert request['annotation'] == str(annotation) and request['box_source'] == 'supplied'
+
+
+def test_real_unet_worker_script_exists():
+    assert UNET_PIPELINE_SCRIPT.is_file()
+    assert UNET_PIPELINE_SCRIPT.parent == PIPELINE_SCRIPT.parent
 
 
 def test_output_file_is_not_treated_as_directory(manager, inputs, tmp_path):

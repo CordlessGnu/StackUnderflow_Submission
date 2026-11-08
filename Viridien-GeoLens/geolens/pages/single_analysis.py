@@ -23,7 +23,7 @@ from geolens.components.interval_details import (
 from geolens.components.lithology_profile import get_selected_interval, render_profile
 from geolens.components.metrics import overview_cards, render_metric_row
 from geolens.components.sidebar import render_empty_state, render_page_header
-from geolens.components.uploader import render_single_upload
+from geolens.components.uploader import EXTRACTION_MODES, render_single_upload
 from geolens.models.schemas import COL_CLUSTER_ID, COL_LITHOLOGY
 from geolens.services.statistics import (
     cluster_statistics,
@@ -40,18 +40,20 @@ def render() -> None:
     render_page_header(
         "Single document",
         "Single Analysis",
-        "Load an extraction CSV or process a TIFF + JSON: interactive profile, lithology statistics and cluster structure.",
+        "Load an extraction CSV or process a TIFF (with or without a bounding-box JSON): "
+        "interactive profile, lithology statistics and cluster structure.",
     )
 
     record = render_single_upload()
 
     if record is None:
-        if st.session_state.get('single_input_mode') == 'TIFF + JSON' and st.session_state.get('extraction_job_id'):
+        if st.session_state.get('single_input_mode') in EXTRACTION_MODES and st.session_state.get('extraction_job_id'):
             st.caption('Analytics appear here after a successful extraction. You can navigate away while it runs.')
         else:
             render_empty_state(
                 "No document loaded",
-                "Upload an extraction CSV or select a TIFF + bounding-box JSON to build an interactive profile. "
+                "Upload an extraction CSV, or select a TIFF (with a bounding-box JSON, or let the U-Net find "
+                "the boxes) to build an interactive profile. "
                 "Lithology types and cluster IDs are discovered automatically.",
             )
         return

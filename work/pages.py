@@ -55,11 +55,13 @@ def _decode_full(path):
         return arr
 
 
-def load_resized(path, stem, w, h):
-    """Return the resized whole page as uint8 RGB (out_h, OUT_W, 3); cached."""
+def load_resized(path, stem, w, h, cache=True):
+    """Return the resized whole page as uint8 RGB (out_h, OUT_W, 3); cached by stem.
+    cache=False neither reads nor writes the cache (for pages from outside the dataset,
+    where two different files can share a name)."""
     out_w, out_h = target_size(w, h)
     cpath = CACHE / f"{stem}.png"
-    if cpath.exists():
+    if cache and cpath.exists():
         a = np.array(Image.open(cpath).convert("RGB"))
         if a.shape[:2] == (out_h, out_w):
             return a
@@ -70,8 +72,9 @@ def load_resized(path, stem, w, h):
     gc.collect()
     if small.ndim == 2:
         small = np.stack([small] * 3, -1)
-    CACHE.mkdir(exist_ok=True)
-    Image.fromarray(small).save(cpath)
+    if cache:
+        CACHE.mkdir(exist_ok=True)
+        Image.fromarray(small).save(cpath)
     return small
 
 

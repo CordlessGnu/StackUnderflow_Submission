@@ -1,5 +1,8 @@
 """Local asynchronous bridge to the repository's TIFF + JSON pipeline.
 
+TIFF-only jobs run info extraction/unet_pipeline.py instead: the U-Net predicts the
+three boxes, then the same pipeline.py stages run on them.
+
 No ML modules are imported into Streamlit. A single isolated Python process
 writes the normal pipeline artifacts; GeoLens later ingests intervals.csv using
 its existing analytics services. Paths and uploads are supported without a shell.
@@ -26,6 +29,9 @@ from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PIPELINE_SCRIPT = REPO_ROOT / 'info extraction/pipeline.py'
+# TIFF-only mode: the U-Net predicts the three boxes, then pipeline.py runs unchanged.
+UNET_PIPELINE_SCRIPT = REPO_ROOT / 'info extraction/unet_pipeline.py'
+UNET_STAGE = '0/6 U-Net region detection'
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / 'crops/geolens_outputs'
 DEFAULT_JOB_ROOT = REPO_ROOT / 'crops/geolens_jobs'
 REQUIRED_REGIONS = ('interpreted_lithology_column', 'depth_column', 'lithology_legend')
@@ -76,21 +82,10 @@ class ExtractionOptions:
         return args
 
 
-def validate_inputs(tiff: Path, annotation: Path) -> dict:
-    """Validate headers/boxes without decoding the full large TIFF raster."""
+def validate_tiff(tiff: Path) -> dict:
+    """Validate the TIFF header only (size, format, orientation); never decodes the raster."""
     if tiff.suffix.lower() not in ('.tif', '.tiff') or not tiff.is_file():
         raise ExtractionError('Select an existing .tif or .tiff document.')
-    if annotation.suffix.lower() != '.json' or not annotation.is_file():
-        raise ExtractionError('Select an existing bounding-box .json file.')
-    if annotation.stat().st_size > 2 * 1024 * 1024:
-        raise ExtractionError('The bounding-box JSON must be smaller than 2 MB.')
-    try:
-        data = json.loads(annotation.read_text(encoding='utf-8'))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ExtractionError(f'Cannot read bounding-box JSON: {exc}') from exc
-    boxes = data.get('bounding_boxes') if isinstance(data, dict) else None
-    if not isinstance(boxes, dict) or any(key not in boxes for key in REQUIRED_REGIONS):
-        raise ExtractionError('JSON needs bounding_boxes for: ' + ', '.join(REQUIRED_REGIONS))
     old_limit = Image.MAX_IMAGE_PIXELS
     Image.MAX_IMAGE_PIXELS = None
     try:
@@ -106,6 +101,26 @@ def validate_inputs(tiff: Path, annotation: Path) -> dict:
         raise ExtractionError(f'Cannot open TIFF: {exc}') from exc
     finally:
         Image.MAX_IMAGE_PIXELS = old_limit
+    return dict(width=width, height=height)
+
+
+def validate_inputs(tiff: Path, annotation: Path) -> dict:
+    """Validate headers/boxes without decoding the full large TIFF raster."""
+    if tiff.suffix.lower() not in ('.tif', '.tiff') or not tiff.is_file():
+        raise ExtractionError('Select an existing .tif or .tiff document.')
+    if annotation.suffix.lower() != '.json' or not annotation.is_file():
+        raise ExtractionError('Select an existing bounding-box .json file.')
+    if annotation.stat().st_size > 2 * 1024 * 1024:
+        raise ExtractionError('The bounding-box JSON must be smaller than 2 MB.')
+    try:
+        data = json.loads(annotation.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ExtractionError(f'Cannot read bounding-box JSON: {exc}') from exc
+    boxes = data.get('bounding_boxes') if isinstance(data, dict) else None
+    if not isinstance(boxes, dict) or any(key not in boxes for key in REQUIRED_REGIONS):
+        raise ExtractionError('JSON needs bounding_boxes for: ' + ', '.join(REQUIRED_REGIONS))
+    size = validate_tiff(tiff)
+    width, height = size['width'], size['height']
     for key, actual in [('width', width), ('height', height)]:
         if key in data and data[key] != actual:
             raise ExtractionError(f'JSON {key}={data[key]} does not match TIFF {key}={actual}.')
@@ -148,6 +163,7 @@ class _Job:
     work_dir: Path
     validation: dict
     process: subprocess.Popen
+    mode: str = 'annotation'  # 'annotation' (TIFF + JSON) or 'unet' (TIFF only)
     started: float = field(default_factory=time.monotonic)
     state: str = 'running'
     message: str = ''
@@ -176,9 +192,10 @@ def _tail(path: Path) -> str:
 class ExtractionJobManager:
     """One active process at a time; safe across Streamlit sessions/reruns."""
     def __init__(self, *, job_root: Path = DEFAULT_JOB_ROOT, pipeline_script: Path = PIPELINE_SCRIPT,
-                 python: str = sys.executable):
+                 unet_script: Path = UNET_PIPELINE_SCRIPT, python: str = sys.executable):
         self.job_root = Path(job_root).resolve()
         self.pipeline_script = Path(pipeline_script).resolve()
+        self.unet_script = Path(unet_script).resolve()
         self.python = python
         self._jobs: dict[str, _Job] = {}
         self._lock = threading.RLock()
@@ -235,6 +252,33 @@ class ExtractionJobManager:
             validation = validate_inputs(tiff, annotation)
             return self._launch(tiff, annotation, output_root, options or ExtractionOptions(), validation)
 
+    def start_tiff_path(self, tiff: str | Path, output_root: str | Path,
+                        options: ExtractionOptions | None = None) -> str:
+        """TIFF only: the U-Net predicts the three boxes, then the normal pipeline runs."""
+        with self._lock:
+            self._ensure_idle()
+            tiff = resolve_local_path(tiff)
+            validation = dict(validate_tiff(tiff), bounding_boxes=None, box_source='unet')
+            return self._launch(tiff, None, output_root, options or ExtractionOptions(), validation)
+
+    @staticmethod
+    def _stage(name: str, stream: BinaryIO, destination: Path) -> Path:
+        # Do not trust browser filenames as filesystem paths.
+        basename = Path(name.replace('\\', '/')).name
+        if not basename or basename in ('.', '..'):
+            raise ExtractionError('Invalid upload filename.')
+        path = destination / basename
+        destination.mkdir()
+        position = stream.tell()
+        stream.seek(0)
+        try:
+            with path.open('wb') as file:
+                while chunk := stream.read(1024 * 1024):
+                    file.write(chunk)
+        finally:
+            stream.seek(position)
+        return path
+
     def start_uploads(self, tiff_name: str, tiff_stream: BinaryIO,
                       annotation_name: str, annotation_stream: BinaryIO,
                       output_root: str | Path, options: ExtractionOptions | None = None) -> str:
@@ -242,25 +286,9 @@ class ExtractionJobManager:
             self._ensure_idle()
             self.job_root.mkdir(parents=True, exist_ok=True)
             staged = Path(tempfile.mkdtemp(prefix='upload_', dir=self.job_root))
-            def stage(name, stream, destination):
-                # Do not trust browser filenames as filesystem paths.
-                basename = Path(name.replace('\\', '/')).name
-                if not basename or basename in ('.', '..'):
-                    raise ExtractionError('Invalid upload filename.')
-                path = destination / basename
-                destination.mkdir()
-                position = stream.tell()
-                stream.seek(0)
-                try:
-                    with path.open('wb') as file:
-                        while chunk := stream.read(1024 * 1024):
-                            file.write(chunk)
-                finally:
-                    stream.seek(position)
-                return path
             try:
-                tiff = stage(tiff_name, tiff_stream, staged / 'document')
-                annotation = stage(annotation_name, annotation_stream, staged / 'annotation')
+                tiff = self._stage(tiff_name, tiff_stream, staged / 'document')
+                annotation = self._stage(annotation_name, annotation_stream, staged / 'annotation')
                 validation = validate_inputs(tiff, annotation)
                 return self._launch(tiff, annotation, output_root, options or ExtractionOptions(), validation)
             except Exception:
@@ -269,10 +297,27 @@ class ExtractionJobManager:
                 shutil.rmtree(staged)
                 raise
 
-    def _launch(self, tiff: Path, annotation: Path, output_root, options, validation) -> str:
+    def start_tiff_upload(self, tiff_name: str, tiff_stream: BinaryIO, output_root: str | Path,
+                          options: ExtractionOptions | None = None) -> str:
+        """Uploaded TIFF only: staged like start_uploads, then the U-Net mode."""
+        with self._lock:
+            self._ensure_idle()
+            self.job_root.mkdir(parents=True, exist_ok=True)
+            staged = Path(tempfile.mkdtemp(prefix='upload_', dir=self.job_root))
+            try:
+                tiff = self._stage(tiff_name, tiff_stream, staged / 'document')
+                validation = dict(validate_tiff(tiff), bounding_boxes=None, box_source='unet')
+                return self._launch(tiff, None, output_root, options or ExtractionOptions(), validation)
+            except Exception:
+                import shutil
+                shutil.rmtree(staged)
+                raise
+
+    def _launch(self, tiff: Path, annotation: Path | None, output_root, options, validation) -> str:
         arguments = options.arguments()
-        if not self.pipeline_script.is_file():
-            raise ExtractionError(f'Pipeline entry point is missing: {self.pipeline_script}')
+        script = self.pipeline_script if annotation is not None else self.unet_script
+        if not script.is_file():
+            raise ExtractionError(f'Pipeline entry point is missing: {script}')
         if not str(output_root).strip():
             raise ExtractionError('Select an output directory.')
         output_root = resolve_local_path(output_root)
@@ -287,15 +332,18 @@ class ExtractionJobManager:
         output = output_root / f'{safe_stem}_{job_id[:8]}'
         work = self.job_root / job_id
         work.mkdir(parents=True)
-        command = [self.python, '-u', '-B', str(self.pipeline_script), str(tiff), str(annotation),
-                   '--output', str(output), *arguments]
-        (work / 'request.json').write_text(json.dumps(dict(command=command, options=asdict(options),
-                                                          tiff=str(tiff), annotation=str(annotation)), indent=2))
+        inputs = [str(tiff)] if annotation is None else [str(tiff), str(annotation)]
+        command = [self.python, '-u', '-B', str(script), *inputs, '--output', str(output), *arguments]
+        (work / 'request.json').write_text(json.dumps(dict(
+            command=command, options=asdict(options), tiff=str(tiff),
+            annotation=None if annotation is None else str(annotation),
+            box_source='supplied' if annotation is not None else 'unet'), indent=2))
         with (work / 'worker.log').open('wb') as log:
             process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT,
                                        start_new_session=(os.name != 'nt'),
                                        env={**os.environ, 'PYTHONUNBUFFERED': '1'})
-        job = _Job(job_id, tiff.name, output, work, validation, process)
+        job = _Job(job_id, tiff.name, output, work, validation, process,
+                   mode='annotation' if annotation is not None else 'unet')
         self._jobs[job_id] = job
         self._save_job(job)
         return job_id
@@ -307,9 +355,12 @@ class ExtractionJobManager:
             job = self._jobs[job_id]
             self._refresh(job)
             manifest = _read_json(job.output_dir / 'run.json')
-            stage = str(manifest.get('current_stage') or ('Finalising outputs' if manifest else 'Starting pipeline'))
+            # TIFF-only jobs spend their first seconds in the U-Net, before pipeline.py writes run.json.
+            waiting = UNET_STAGE if job.mode == 'unet' else 'Starting pipeline'
+            stage = str(manifest.get('current_stage') or ('Finalising outputs' if manifest else waiting))
             stages = manifest.get('stages', {})
-            completed = sum(s.get('status') == 'complete' for s in stages.values() if isinstance(s, dict)) if isinstance(stages, dict) else 0
+            completed = sum(s.get('status') == 'complete' for key, s in stages.items()
+                            if isinstance(s, dict) and key != UNET_STAGE) if isinstance(stages, dict) else 0
             progress = 1.0 if job.state == 'succeeded' else min(0.99, completed / 6)
             return JobSnapshot(job_id, job.source_name, job.output_dir, job.state, stage, progress,
                                job.message, manifest, _tail(job.work_dir / 'worker.log'),
