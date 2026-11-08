@@ -46,6 +46,10 @@ class PipelineConfig:
     cluster_threshold: float = 0.20
     max_match_distance: float = 0.32
     min_match_margin: float = 0.06
+    matcher: str = 'hybrid'
+    shortlist_size: int = 3
+    max_representatives: int = 3
+    seam_threshold: float = 0.20
     depth_samples: int = 12
     depth_rotation: str = 'auto'
     depth_label_mode: str = 'auto'
@@ -67,7 +71,14 @@ class PipelineConfig:
             raise ValueError('Invalid depth label mode')
         if not 0 <= self.margin < 0.45:
             raise ValueError('margin must be in [0, 0.45)')
-        for value in (self.boundary_threshold, self.color_threshold, self.cluster_threshold, self.max_match_distance):
+        if self.matcher not in ('hybrid', 'descriptor'):
+            raise ValueError('matcher must be hybrid or descriptor')
+        if not isinstance(self.shortlist_size, int) or not 1 <= self.shortlist_size <= 10:
+            raise ValueError('shortlist_size must be in [1,10]')
+        if not isinstance(self.max_representatives, int) or not 1 <= self.max_representatives <= 5:
+            raise ValueError('max_representatives must be in [1,5]')
+        for value in (self.boundary_threshold, self.color_threshold, self.cluster_threshold,
+                      self.max_match_distance, self.seam_threshold):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError('Detection/matching thresholds must be finite and positive')
         if not math.isfinite(self.min_match_margin) or self.min_match_margin < 0:
@@ -95,6 +106,8 @@ class PipelineResult:
     cluster_count: int
     matched_intervals: int
     warnings: list[str]
+    fallback_intervals: int = 0
+    blank_intervals: int = 0
 
     @property
     def csv_path(self) -> Path:
@@ -271,8 +284,10 @@ def run_pipeline(image_path: str | Path, annotation_path: str | Path,
         labelled = stage('4/6 visual clusters and lithology', lambda: label_intervals(
             column, boundaries, swatches, cluster_threshold=config.cluster_threshold,
             max_match_distance=config.max_match_distance, min_match_margin=config.min_match_margin,
-            margin=config.margin))
+            margin=config.margin, matcher=config.matcher, shortlist_size=config.shortlist_size,
+            max_representatives=config.max_representatives, seam_threshold=config.seam_threshold))
         warnings.extend(labelled.warnings)
+        manifest['matching_diagnostics'] = labelled.diagnostics
         write_results(labelled, column, output / 'classification', 'intervals', swatches)
 
         depth_path = crops.paths['depth_column']
@@ -292,21 +307,26 @@ def run_pipeline(image_path: str | Path, annotation_path: str | Path,
 
         def export():
             write_final(rows, column, calibration, alignment, output, 'intervals', warnings=warnings,
-                        clusters=labelled.clusters, coordinate_system=config.coordinate_system)
+                        clusters=labelled.clusters, coordinate_system=config.coordinate_system,
+                        matching_diagnostics=labelled.diagnostics)
             save_calibration(calibration, depth_path, output / 'depth_calibration')
 
         stage('6/6 final CSV, JSON and annotated column', export)
         matched = sum(row['match_status'] == 'matched' for row in rows)
+        fallback_count = sum(row['lithology_fallback'] for row in rows)
+        unknown_count = sum(row['lithology'].strip().casefold() == 'unknown' for row in rows)
+        blank_count = sum(str(row['match_status']).strip().casefold() == 'blank' for row in rows)
         manifest.update(status='completed_with_warnings' if warnings else 'completed',
                         interval_count=len(rows), cluster_count=len(labelled.clusters),
-                        named_intervals=matched, unknown_intervals=len(rows) - matched,
+                        named_intervals=len(rows) - unknown_count - blank_count, verified_intervals=matched,
+                        fallback_intervals=fallback_count, blank_intervals=blank_count, unknown_intervals=unknown_count,
                         depth_anchor_count=len(calibration.anchors), depth_fit_rmse_px=calibration.rmse_px,
                         coordinate_system=config.coordinate_system,
                         artifacts=dict(csv='intervals.csv', json='intervals.json', annotated_column='intervals.png',
                                        calibration='depth_calibration.json', classification='classification/intervals.json'))
         manifest.pop('current_stage', None)
         save_manifest()
-        return PipelineResult(output, len(rows), len(labelled.clusters), matched, list(warnings))
+        return PipelineResult(output, len(rows), len(labelled.clusters), matched, list(warnings), fallback_count, blank_count)
     except Exception as exc:
         manifest.update(status='failed', error=f'{type(exc).__name__}: {exc}')
         save_manifest()
@@ -335,6 +355,10 @@ def main() -> None:
     parser.add_argument('--cluster-threshold', type=float, default=0.20)
     parser.add_argument('--max-match-distance', type=float, default=0.32)
     parser.add_argument('--min-match-margin', type=float, default=0.06)
+    parser.add_argument('--matcher', choices=['hybrid', 'descriptor'], default='hybrid')
+    parser.add_argument('--shortlist-size', type=int, default=3)
+    parser.add_argument('--max-representatives', type=int, default=3)
+    parser.add_argument('--seam-threshold', type=float, default=0.20)
     parser.add_argument('--strict-legend', action='store_true', help='fail instead of outputting unknown if no usable legend is detected')
     parser.add_argument('--page', type=int, default=0, help='zero-based TIFF page, default 0')
     parser.add_argument('--max-pixels', type=int, default=1_000_000_000)
@@ -347,7 +371,10 @@ def main() -> None:
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f'Pipeline failed: {exc}\nInspect run.json in the output folder if it was created.\n')
     print(f'{result.interval_count} intervals -> {result.cluster_count} clusters; '
-          f'{result.matched_intervals} named; output: {result.output}')
+          f'{result.matched_intervals} verified; {result.fallback_intervals} runner-up fallbacks; '
+          f'{result.blank_intervals} blank; '
+          f'{result.interval_count - result.matched_intervals - result.fallback_intervals - result.blank_intervals} unknown; '
+          f'output: {result.output}')
     for warning in result.warnings:
         print(f'Warning: {warning}')
 
