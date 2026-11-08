@@ -4,24 +4,95 @@ GeoLens turns automated lithology extraction outputs (structured CSVs) into inte
 
 It lets geoscientists analyse a single document, compare an entire collection, and export traceable data and reports without manually opening each CSV.
 
-> GeoLens consumes existing extraction outputs. It does **not** run or retrain an AI model, and it does not claim that extracted predictions are geologically correct.
+> GeoLens can consume existing CSVs or run this repository's extraction pipeline locally from TIFF + bbox JSON inputs. It does not retrain models or claim that predictions are geologically correct.
 
 ---
 
 ## Quick start
 
+From the **repository root**, install the combined pipeline/UI dependencies and launch:
+
 ```bash
-pip install -r requirements.txt
-streamlit run app.py
+python -m pip install -r requirements.txt
+python run_geolens.py
 ```
 
-Then open the URL Streamlit prints (usually <http://localhost:8501>).
+Then open <http://127.0.0.1:8501>. The launcher loads this directory's dark theme,
+loopback-only server configuration, and upload settings. To use another port:
+`python run_geolens.py --server.port 8502`.
 
-Run the test suite:
+Alternatively, from this directory run `python -m streamlit run app.py` after
+installing the root dependencies. Installing only this directory's
+`requirements.txt` supports CSV analytics but may lack the ML packages required
+for extraction. The worker uses the **same Python interpreter** as Streamlit.
+
+Run the GeoLens test suite from this directory:
 
 ```bash
+cd Viridien-GeoLens  # when starting at the repository root
 python -m pytest
 ```
+
+**Integration validation:** 126 GeoLens tests pass, including real subprocess
+lifecycle/cancellation tests and Streamlit CSV-handoff tests. An uncached GB506
+TIFF + JSON run was also exercised through the actual UI: all six stages
+completed, 201 intervals loaded as `Ready`, and four existing analytics charts
+rendered. The selected output directory was honoured; the source's two blank
+intervals and 62 runner-up flags were preserved. This validates integration, not
+geological accuracy.
+
+The separate pipeline suite currently retains one pre-existing rounding mismatch
+in `tests/test_depth_output.py`: its JSON assertion expects 1004, while the current
+rounding setting exports 1000. This predates the UI changes; pipeline rounding
+logic was not altered. The UI exposes rounding explicitly, including 0 for full
+precision.
+
+### Local extraction: TIFF + JSON
+
+In **Single Analysis**, select **Input source → TIFF + JSON**:
+
+1. Choose **Local file paths** (recommended for large TIFFs) and paste/select the
+   `.tif`/`.tiff` and its bounding-box `.json`. Relative paths resolve from the
+   repository root. Alternatively choose **Upload files** and upload both files.
+2. Select an **Output directory** using **Browse…**, or enter a local path. Each
+   run creates a new `<document>_<job-id>` subfolder there; previous outputs are
+   not overwritten. You may enter a new directory and it will be created.
+3. Optionally adjust the matcher, minimum interval height, texture context,
+   units and depth rounding. Rounding defaults to the pipeline's **10 units**;
+   set it to **0** to preserve full precision (recommended for thin beds).
+   Reviewed legend/depth calibration paths are optional, not required inputs.
+4. Click **Run extraction**. A separate process performs the six pipeline stages
+   while the UI remains usable. Progress, warnings and worker logs are shown;
+   **Cancel extraction** stops the process and retains partial outputs for review.
+5. On success the final `intervals.csv` automatically enters the **existing**
+   profile, filters, statistics, quality checks and interval tables. Use **Add
+   this extraction to collection** for Batch Analysis and Comparison Studio.
+
+Only one extraction runs per GeoLens server to limit TIFF/model memory usage.
+Navigating to another page does not cancel it; return to Single Analysis to see
+results. If another browser session started the active job, **View active
+extraction** attaches its progress. A normal server shutdown stops active workers.
+
+**Local picker:** Browse opens a native dialog on the machine running GeoLens,
+not a remote browser filesystem. This is intended for the local demo. If Tk or a
+graphical display is unavailable, enter paths manually; the app remains usable.
+There is no separate API server to start. The app binds to localhost by default.
+
+The selected run folder contains native crops, `intervals.csv`, `intervals.json`,
+`intervals.png`, legend review files, depth calibration and the pipeline's
+`run.json`. CSV/JSON/annotated-column download buttons are also provided. The
+Export Centre continues to offer its existing browser downloads for analytics.
+Temporary uploaded inputs and worker logs are retained under
+`crops/geolens_jobs/`; remove old job folders only when no job is running. Failed
+or cancelled runs are never automatically loaded as successful analytics.
+
+**Blank and fallback policy:** original pipeline CSV values are preserved in
+`source_df` and original exports. Empty lithology cells with `match_status=blank`
+are displayed as the unassigned **Blank** category for charts, not as a missing
+rock prediction. `lithology_fallback` is parsed into a derived boolean flag;
+runner-up assignments are explicitly described as **not verified matches** in
+the interval detail and data quality views. Extra pipeline diagnostic columns
+remain available in tables and processed exports.
 
 ### Appearance
 
@@ -51,7 +122,7 @@ and path-traversal entries are ignored. Only `.csv` files are extracted.
 ## What it does
 
 ### 1. Single Analysis
-- Upload one extraction CSV.
+- Upload one extraction CSV, or run the TIFF + JSON pipeline and load its CSV automatically.
 - Overview metrics: intervals, unique lithologies, unique clusters, depth
   coverage, average thickness, thickest interval.
 - **Interactive geological profile** (Plotly): layer heights are proportional to
@@ -126,9 +197,12 @@ geolens/
     interval_details.py         # detail panel + cluster explorer
     filters.py                  # filter controls
     charts.py                   # Plotly chart builders
-    uploader.py                 # upload widgets + session state
+    uploader.py                 # CSV / TIFF+JSON input modes and session state
+    extraction.py               # output picker, background progress and CSV handoff
   services/                     # all business logic
     csv_loader.py               # parsing, schema validation, column aliases
+    extraction_service.py       # isolated local worker jobs and input validation
+    local_picker.py             # optional native file/folder dialogs
     archive_loader.py           # folder (ZIP) upload extraction
     data_processor.py           # calculated fields, consolidation, filtering
     statistics.py               # single-document + collection statistics
@@ -142,7 +216,7 @@ geolens/
     colors.py                   # dynamic colour generation
     formatting.py               # number/label formatting
     helpers.py                  # ids and file helpers
-  tests/                        # pytest suite (102 tests)
+  tests/                        # analytics, subprocess and Streamlit integration tests
   sample_data/                  # illustrative synthetic CSVs
 ```
 

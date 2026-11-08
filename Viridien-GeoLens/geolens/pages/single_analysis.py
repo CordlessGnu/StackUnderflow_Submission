@@ -40,17 +40,20 @@ def render() -> None:
     render_page_header(
         "Single document",
         "Single Analysis",
-        "Explore one extraction output: interactive geological profile, lithology statistics and cluster structure.",
+        "Load an extraction CSV or process a TIFF + JSON: interactive profile, lithology statistics and cluster structure.",
     )
 
     record = render_single_upload()
 
     if record is None:
-        render_empty_state(
-            "No document loaded",
-            "Upload an extraction CSV to build an interactive geological profile. "
-            "Lithology types and cluster IDs are discovered automatically.",
-        )
+        if st.session_state.get('single_input_mode') == 'TIFF + JSON' and st.session_state.get('extraction_job_id'):
+            st.caption('Analytics appear here after a successful extraction. You can navigate away while it runs.')
+        else:
+            render_empty_state(
+                "No document loaded",
+                "Upload an extraction CSV or select a TIFF + bounding-box JSON to build an interactive profile. "
+                "Lithology types and cluster IDs are discovered automatically.",
+            )
         return
 
     if record.load_error:
@@ -74,6 +77,10 @@ def render() -> None:
     if df.empty:
         st.warning("The uploaded CSV contains no interval records.")
         return
+
+    if 'is_blank_interval' in df.columns and df['is_blank_interval'].any():
+        st.caption('“Blank” is an unassigned display category in these charts, not a rock type. '
+                   'The source CSV lithology cells remain empty.')
 
     # Colour maps are built from the data, so unseen labels get colours too.
     lithology_colors = build_color_map(df[COL_LITHOLOGY].astype(str).unique())

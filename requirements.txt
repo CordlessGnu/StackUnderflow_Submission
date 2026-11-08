@@ -1,0 +1,27 @@
+# StackUnderflow - HackTheBurgh 2026
+#
+# Python 3.13 (pyenv env: hacktheburgh)
+#   pyenv activate hacktheburgh
+#   pip install -r requirements.txt
+#
+# Everything here is a pure pip dependency. No system binaries are required:
+# OCR runs on RapidOCR + ONNX Runtime, and the ONNX models ship inside the
+# rapidocr wheel, so nothing is downloaded or installed at runtime.
+
+# --- TIFF cropping, RGB boundaries and interval descriptors (info extraction/) ---
+Pillow>=10.0.0
+numpy>=1.24
+
+# --- OCR for legend names and depth labels (legend_utils.py, depth_distance.py) ---
+rapidocr>=3.0.0
+onnxruntime>=1.17.0
+
+# --- Swatch detection (pipeline.py / interval_lithology.py) ---
+# Runs models/swatch_detection.pt, a YOLO detector for material_texture and
+# material_name boxes. CPU inference works; a CUDA build of torch is optional.
+ultralytics>=8.3.0
+torch>=2.2.0
+torchvision>=0.17.0
+
+# --- GeoLens local UI and analytics ---
+-r Viridien-GeoLens/requirements.txt

@@ -68,17 +68,29 @@ def add_calculated_fields(
     out[COL_DOCUMENT_ID] = document_id
     out[COL_DOCUMENT_NAME] = document_name
 
-    # Record missingness *before* filling placeholders so validation can report
-    # the original gap rather than the substituted label.
+    # Keep pipeline provenance in derived flags; source_df is never modified.
+    status = out.get('match_status', pd.Series('', index=out.index)).astype('object')
+    status = status.where(status.notna(), '').astype(str).str.strip().str.casefold()
+    out['is_blank_interval'] = status.eq('blank')
+    if 'lithology_fallback' in out.columns:
+        out['is_runner_up_fallback'] = out['lithology_fallback'].map(
+            lambda value: str(value).strip().casefold() in ('true', '1', 'yes') if pd.notna(value) else False)
+    else:
+        out['is_runner_up_fallback'] = False
+
+    # Record missingness before placeholders, except intentionally blank beds.
     if COL_LITHOLOGY in out.columns:
         out[COL_LITHOLOGY_MISSING] = out[COL_LITHOLOGY].isna() | (
             out[COL_LITHOLOGY].astype(str).str.strip() == ""
         )
-        # Case-fold lithology labels so "Shale", "SHALE" and "shale" count as
-        # one lithology across every document.
+        intentional_blank = out['is_blank_interval'] & out[COL_LITHOLOGY_MISSING]
+        out[COL_LITHOLOGY_MISSING] &= ~intentional_blank
+        # Case-fold real labels. "Blank" is a DISPLAY category only: original
+        # extraction CSV/source_df retain the empty lithology cell exactly.
         out[COL_LITHOLOGY] = _clean_label(
             out[COL_LITHOLOGY], UNKNOWN_LITHOLOGY, fold_case=True
         )
+        out.loc[intentional_blank, COL_LITHOLOGY] = 'Blank'
     else:
         out[COL_LITHOLOGY_MISSING] = True
 

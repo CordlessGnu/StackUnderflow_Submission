@@ -311,7 +311,7 @@ def run_pipeline(image_path: str | Path, annotation_path: str | Path,
 
         def export():
             write_final(rows, column, calibration, alignment, output, 'intervals', warnings=warnings,
-                        clusters=labelled.clusters, coordinate_system=config.coordinate_system
+                        clusters=labelled.clusters, coordinate_system=config.coordinate_system,
                         matching_diagnostics=labelled.diagnostics, depth_rounding = config.depth_rounding)
                         
             save_calibration(calibration, depth_path, output / 'depth_calibration')

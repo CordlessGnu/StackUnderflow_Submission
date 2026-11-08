@@ -1,6 +1,24 @@
 # StackUnderflow_Submission
 Stack Underflows teams submission for HackTheBurgh 2026
 
+## GeoLens local demo
+
+```bash
+python -m pip install -r requirements.txt
+python run_geolens.py
+```
+
+Open **http://127.0.0.1:8501**. In **Single Analysis**, keep the existing CSV mode
+or select **TIFF + JSON**, choose/upload the two files, select the output directory,
+and click **Run extraction**. Progress runs in the background; on success GeoLens
+loads the generated CSV into its existing analytics. Native Browse dialogs are
+optional—local paths can always be entered manually. Each run gets a fresh output
+subfolder; previous runs are not overwritten.
+
+See [GeoLens usage](Viridien-GeoLens/README.md) for settings, cancellation, download
+and collection workflows. Depth rounding follows the pipeline default (10 units);
+choose **0** in Extraction settings to preserve thin-interval precision.
+
 ## Complete lithology pipeline
 
 Input: **one full-document TIFF and its three-region bounding-box JSON**.

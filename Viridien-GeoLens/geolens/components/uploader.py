@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Sequence
+import hashlib
 
 import pandas as pd
 import streamlit as st
@@ -32,7 +33,12 @@ def get_single_document() -> DocumentRecord | None:
 
 
 def set_single_document(record: DocumentRecord | None) -> None:
-    """Store (or clear) the single-analysis document."""
+    """Store the active document; clear stale selections when its identity changes."""
+    previous = st.session_state.get(SINGLE_KEY)
+    if record is not None and (previous is None or previous.document_id != record.document_id):
+        from geolens.components.filters import reset_filters
+        reset_filters('single')
+        st.session_state.pop('selected_interval', None)
     st.session_state[SINGLE_KEY] = record
 
 
@@ -47,7 +53,18 @@ def clear_collection() -> None:
 
 
 def render_single_upload() -> DocumentRecord | None:
-    """Render the single-document upload form and return the loaded record."""
+    """Choose an existing CSV or run extraction and reuse the same analytics."""
+    mode = st.radio('Input source', ['Extraction CSV', 'TIFF + JSON'], horizontal=True,
+                    key='single_input_mode')
+    if mode == 'TIFF + JSON':
+        from geolens.components.extraction import render_tiff_upload
+        record = render_tiff_upload()
+        set_single_document(record)
+        return record
+    return _render_single_csv_upload()
+
+
+def _render_single_csv_upload() -> DocumentRecord | None:
     st.markdown('<div class="gl-panel-title">Upload extraction output</div>', unsafe_allow_html=True)
 
     csv_file = st.file_uploader(
@@ -58,18 +75,23 @@ def render_single_upload() -> DocumentRecord | None:
     )
 
     if csv_file is None:
+        set_single_document(None)
         return None
 
-    signature = stable_id(csv_file.name, str(csv_file.size))
-    existing = get_single_document()
+    csv_bytes = csv_file.getvalue()
+    signature = stable_id(csv_file.name, hashlib.sha256(csv_bytes).hexdigest())
+    existing = st.session_state.get('single_csv_document')
     if existing is not None and st.session_state.get("single_signature") == signature:
+        set_single_document(existing)
         return existing
 
     record = build_document(
-        csv_bytes=csv_file.getvalue(),
+        csv_bytes=csv_bytes,
         csv_name=csv_file.name,
+        document_id=signature,
     )
     st.session_state["single_signature"] = signature
+    st.session_state['single_csv_document'] = record
     set_single_document(record)
     st.session_state.pop("selected_interval", None)
     return record

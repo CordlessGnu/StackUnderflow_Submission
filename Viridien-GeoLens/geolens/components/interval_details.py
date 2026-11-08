@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Mapping
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -76,6 +77,11 @@ def render_interval_details(
         _kv("Top pixel (top_y)", format_number(row.get(COL_TOP_Y), 0)),
         _kv("Bottom pixel (bottom_y)", format_number(row.get(COL_BOTTOM_Y), 0)),
         _kv("Source row", format_number(row.get(COL_SOURCE_ROW), 0)),
+        *([_kv('Match status', escape(str(row.get('match_status', ''))))] if 'match_status' in row.index else []),
+        *([_kv('Assignment', 'Runner-up fallback — not a verified match')]
+          if bool(row.get('is_runner_up_fallback', False)) else []),
+        *([_kv('Assignment', 'Intentional blank interval (source lithology cell is empty)')]
+          if bool(row.get('is_blank_interval', False)) else []),
         "</div>",
     ]
     st.markdown("".join(html), unsafe_allow_html=True)
@@ -145,6 +151,12 @@ def render_interval_table(df: pd.DataFrame, *, max_rows: int = 200) -> None:
             COL_CLUSTER_ID,
             COL_TOP_Y,
             COL_BOTTOM_Y,
+            'match_status',
+            'lithology_fallback',
+            'match_seam_score',
+            'fallback_distance',
+            'depth_extrapolated',
+            'depth_unit',
         )
         if c in df.columns
     ]

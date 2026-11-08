@@ -95,6 +95,16 @@ def check_document(df: pd.DataFrame, *, document_id: str) -> list[QualityFinding
                 )
             )
 
+    for flag, check, message in (
+        ('is_blank_interval', 'intentional_blank_intervals', 'intentionally blank interval(s); source lithology cells remain empty'),
+        ('is_runner_up_fallback', 'runner_up_fallbacks', 'runner-up fallback label(s); these are not verified matches'),
+    ):
+        if flag in df.columns:
+            present = df[flag].fillna(False).astype(bool)
+            if present.any():
+                findings.append(_finding(document_id, check, SEVERITY_INFO, int(present.sum()),
+                                         f'{int(present.sum())} {message}.', row_ids[present].tolist()))
+
     # Thickness anomalies -----------------------------------------------------
     thickness = interval_thickness(df)
     negative = thickness < 0

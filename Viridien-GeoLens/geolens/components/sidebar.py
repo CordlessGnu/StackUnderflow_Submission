@@ -52,7 +52,7 @@ def render_document_info(collection: DocumentCollection | None) -> None:
     if collection is None or len(collection) == 0:
         st.markdown('<div class="gl-panel-title">Documents</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="gl-note">No documents loaded. Upload an extraction CSV to begin.</div>',
+            '<div class="gl-note">Upload a CSV or run TIFF + JSON extraction in Single Analysis.</div>',
             unsafe_allow_html=True,
         )
         return
@@ -88,7 +88,7 @@ def render_footer_note() -> None:
     """Render the sidebar disclaimer."""
     st.markdown("---")
     st.caption(
-        "GeoLens analyses uploaded extraction outputs. "
+        "GeoLens runs the local extraction pipeline and analyses its CSV outputs. "
         "It does not verify geological accuracy."
     )
 

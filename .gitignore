@@ -1,3 +1,8 @@
 *.txt
 Dataset/
 crops/
+!/requirements.txt
+!/Viridien-GeoLens/requirements.txt
+__pycache__/
+*.py[cod]
+.pytest_cache/
