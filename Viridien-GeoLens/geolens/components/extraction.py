@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 from geolens.models.data_models import DocumentRecord
-from geolens.services.data_processor import build_document
+from geolens.services.data_processor import CSV_PROCESSING_VERSION, build_document
 from geolens.services.extraction_service import (
     DEFAULT_OUTPUT_ROOT, ExtractionError, ExtractionJobManager, ExtractionOptions,
 )
@@ -66,13 +66,15 @@ def _render_job(job_id: str) -> None:
             manager.cancel(job_id)
             st.rerun()
     elif job.state == 'succeeded':
-        if st.session_state.get(LOADED_KEY) != job_id:
+        if (st.session_state.get(LOADED_KEY) != job_id
+                or st.session_state.get('extraction_processing_version') != CSV_PROCESSING_VERSION):
             try:
                 name = f'{Path(job.source_name).stem}_{job_id[:6]}.csv'
                 record = build_document(csv_bytes=job.csv_path.read_bytes(), csv_name=name,
                                         document_id=f'extraction_{job_id}')
                 st.session_state[RECORD_KEY] = record
                 st.session_state[LOADED_KEY] = job_id
+                st.session_state['extraction_processing_version'] = CSV_PROCESSING_VERSION
                 st.rerun()  # refresh the normal Single Analysis page, not a separate analysis implementation
             except OSError as exc:
                 st.error(f'Cannot load the generated CSV: {exc}')

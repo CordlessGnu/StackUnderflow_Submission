@@ -11,6 +11,8 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
+CSV_PROCESSING_VERSION = 'final-lithology-clusters-v1'
+
 from geolens.models.schemas import (
     COL_BASE_DEPTH,
     COL_CLUSTER_ID,
@@ -101,6 +103,9 @@ def add_calculated_fields(
         out[COL_CLUSTER_ID] = _clean_label(out[COL_CLUSTER_ID], UNKNOWN_CLUSTER)
     else:
         out[COL_CLUSTER_MISSING] = True
+
+    from geolens.services.cluster_ids import align_pipeline_cluster_ids
+    out = align_pipeline_cluster_ids(out)
 
     issues: list[str] = []
     valid: list[bool] = []

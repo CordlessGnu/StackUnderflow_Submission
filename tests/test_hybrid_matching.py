@@ -98,7 +98,7 @@ class HybridMatchingTests(unittest.TestCase):
         gate = (max(distances[0, 1], distances[1, 2]) + distances[0, 2]) / 2
         image = np.vstack([np.asarray(p) for p in patches])
         result = label_intervals(image, [(0, 180), (180, 360), (360, 540)], [], cluster_threshold=gate / 1.5)
-        for group in result.clusters:
+        for group in result.visual_clusters:
             indices = group['member_indices']
             self.assertTrue((distances[np.ix_(indices, indices)] <= gate + 1e-8).all())
 

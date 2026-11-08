@@ -25,6 +25,7 @@ from depth_distance import (DepthCalibration, calibrate_depth_column,
 from interval_lithology import (apply_runner_up_fallback, _open_rgb, extract_legend, label_intervals,
                                 load_swatch_manifest, save_swatch_manifest)
 from texture_boundaries import detect_boundaries
+from lithology_groups import consolidate_lithology_clusters
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = ['top_y', 'bottom_y', 'cluster_id', 'lithology', 'top_depth', 'base_depth']
@@ -160,20 +161,22 @@ def attach_depths(rows: Sequence[dict], calibration: DepthCalibration,
                    document_bottom_y=(round(alignment.document_y(bottom), 6)
                                       if alignment.document_coordinates_known else None))
         output.append(row)
-    return output
+    return consolidate_lithology_clusters(output)[0]
 
 
 def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCalibration,
                 alignment: CropAlignment, output: str | Path, stem: str, *,
                 warnings: Sequence[str] = (), clusters: Sequence[dict] = (),
-                coordinate_system: str = 'crop', matching_diagnostics: dict | None = None, depth_rounding: float = 10) -> None:
+                coordinate_system: str = 'crop', matching_diagnostics: dict | None = None,
+                depth_rounding: float = 10, visual_clusters: Sequence[dict] = ()) -> None:
     if coordinate_system not in ('crop', 'document'):
         raise ValueError('coordinate_system must be crop or document')
     if coordinate_system == 'document' and not alignment.document_coordinates_known:
         raise ValueError('Document coordinates require known crop geometry')
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    local_rows = [apply_runner_up_fallback(row) for row in rows]
+    local_rows, named_groups = consolidate_lithology_clusters(
+        [apply_runner_up_fallback(row) for row in rows], clusters)
     records = [dict(row) for row in local_rows]
     if coordinate_system == 'document':
         for row in records:
@@ -192,7 +195,9 @@ def write_final(rows: Sequence[dict], image: Image.Image, calibration: DepthCali
         writer.writerows(records)
     diagnostics = dict(matching_diagnostics or {})
     diagnostics['runner_up_fallback_intervals'] = sum(r['lithology_fallback'] for r in local_rows)
-    data = dict(intervals=records, clusters=[apply_runner_up_fallback(c) for c in clusters],
+    diagnostics.update(cluster_id_policy='final_lithology', lithology_cluster_count=len(named_groups),
+                       visual_cluster_count=len({r['visual_cluster_id'] for r in local_rows if r['visual_cluster_id']}))
+    data = dict(intervals=json_records, clusters=named_groups, visual_clusters=list(visual_clusters),
                 calibration=calibration.to_dict(),
                 alignment=asdict(alignment), warnings=list(warnings),
                 matching_diagnostics=diagnostics,
@@ -266,6 +271,7 @@ def main() -> None:
     depth_path = args.depth_column or args.column.parent.parent / 'depth_column' / args.column.name
     depth_image = _open_rgb(depth_path)
     warnings, clusters = [], []
+    visual_clusters = []
     matching_diagnostics = {}
     explicit = args.column_top is not None or args.depth_top is not None
     if explicit:
@@ -302,6 +308,7 @@ def main() -> None:
                                       for row, saved in zip(rows, saved_rows)))
                 if consistent:
                     clusters = details.get('clusters', [])
+                    visual_clusters = details.get('visual_clusters', [])
                     matching_diagnostics = details.get('diagnostics', details.get('matching_diagnostics', {}))
                     warnings.extend(details.get('warnings', []))
                 else:
@@ -325,6 +332,7 @@ def main() -> None:
                                  matcher=args.matcher, shortlist_size=args.shortlist_size,
                                  max_representatives=args.max_representatives, seam_threshold=args.seam_threshold)
         rows, clusters = [asdict(row) for row in result.intervals], result.clusters
+        visual_clusters = result.visual_clusters
         matching_diagnostics = result.diagnostics
         warnings.extend(result.warnings)
     final = attach_depths(rows, calibration, alignment, column.height, depth_unit=args.depth_unit,
@@ -334,7 +342,8 @@ def main() -> None:
     if extrapolated:
         warnings.append(f'{extrapolated} intervals extend beyond accepted depth anchors; linear extrapolation is flagged.')
     write_final(final, column, calibration, alignment, args.output, args.column.stem,
-                warnings=warnings, clusters=clusters, matching_diagnostics=matching_diagnostics, depth_rounding=args.depth_rounding)
+                warnings=warnings, clusters=clusters, matching_diagnostics=matching_diagnostics,
+                depth_rounding=args.depth_rounding, visual_clusters=visual_clusters)
     save_calibration(calibration, depth_path, args.output / f'{args.column.stem}_depth')
     fallback_count = sum(row['lithology_fallback'] for row in final)
     print(f'{len(final)} final intervals; {len(set(r["cluster_id"] for r in final))} clusters; '

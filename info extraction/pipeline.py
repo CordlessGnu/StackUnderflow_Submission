@@ -312,7 +312,8 @@ def run_pipeline(image_path: str | Path, annotation_path: str | Path,
         def export():
             write_final(rows, column, calibration, alignment, output, 'intervals', warnings=warnings,
                         clusters=labelled.clusters, coordinate_system=config.coordinate_system,
-                        matching_diagnostics=labelled.diagnostics, depth_rounding = config.depth_rounding)
+                        matching_diagnostics=labelled.diagnostics, depth_rounding=config.depth_rounding,
+                        visual_clusters=labelled.visual_clusters)
                         
             save_calibration(calibration, depth_path, output / 'depth_calibration')
 
@@ -323,6 +324,7 @@ def run_pipeline(image_path: str | Path, annotation_path: str | Path,
         blank_count = sum(str(row['match_status']).strip().casefold() == 'blank' for row in rows)
         manifest.update(status='completed_with_warnings' if warnings else 'completed',
                         interval_count=len(rows), cluster_count=len(labelled.clusters),
+                        visual_cluster_count=len(labelled.visual_clusters), cluster_id_policy='final_lithology',
                         named_intervals=len(rows) - unknown_count - blank_count, verified_intervals=matched,
                         fallback_intervals=fallback_count, blank_intervals=blank_count, unknown_intervals=unknown_count,
                         depth_anchor_count=len(calibration.anchors), depth_fit_rmse_px=calibration.rmse_px,

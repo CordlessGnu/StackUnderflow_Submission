@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import colorsys
 import csv
+import hashlib
 import json
 import math
 import textwrap
@@ -21,6 +22,7 @@ from PIL import Image, ImageDraw
 
 from texture_boundaries import BoundaryResult, _distance, _row_features, detect_boundaries
 from texture_seam import PreparedTexture, SeamVerifier, prepare_texture
+from lithology_groups import consolidate_lithology_clusters
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,6 +55,7 @@ class LabelledInterval:
     match_method: str = 'descriptor'
     lithology_fallback: bool = False
     fallback_distance: float | None = None
+    visual_cluster_id: str = ''
 
 
 @dataclass
@@ -61,6 +64,7 @@ class LithologyResult:
     clusters: list[dict]
     warnings: list[str] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
+    visual_clusters: list[dict] = field(default_factory=list)
 
 
 def apply_runner_up_fallback(original: dict) -> dict:
@@ -603,7 +607,11 @@ def label_intervals(
                        group_seam_evaluations=group_evaluations,
                        legend_seam_evaluations=verifier.evaluations - group_evaluations,
                        uncertain_group_intervals=uncertain, **verifier.statistics())
-    return LithologyResult(rows, summaries, warnings, diagnostics)
+    records, named_groups = consolidate_lithology_clusters([asdict(row) for row in rows], summaries)
+    diagnostics.update(cluster_id_policy='final_lithology', visual_cluster_count=len(summaries),
+                       lithology_cluster_count=len(named_groups))
+    return LithologyResult([LabelledInterval(**row) for row in records], named_groups,
+                           warnings, diagnostics, summaries)
 
 
 def read_intervals(path: str | Path) -> list[tuple[int, int]]:
@@ -615,44 +623,51 @@ def write_results(result: LithologyResult, image: Image.Image, output: str | Pat
                   swatches: Sequence[LegendSwatch] = ()) -> None:
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    records = [apply_runner_up_fallback(asdict(row)) for row in result.intervals]
+    records, named_groups = consolidate_lithology_clusters(
+        [apply_runner_up_fallback(asdict(row)) for row in result.intervals], result.clusters)
     with (output / f'{stem}.csv').open('w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=list(LabelledInterval.__dataclass_fields__))
         writer.writeheader()
         writer.writerows(records)
     diagnostics = dict(result.diagnostics)
     diagnostics['runner_up_fallback_intervals'] = sum(r['lithology_fallback'] for r in records)
-    (output / f'{stem}.json').write_text(json.dumps(dict(intervals=records, clusters=[apply_runner_up_fallback(c) for c in result.clusters],
+    diagnostics.update(cluster_id_policy='final_lithology', lithology_cluster_count=len(named_groups),
+                       visual_cluster_count=len({r['visual_cluster_id'] for r in records if r['visual_cluster_id']}))
+    (output / f'{stem}.json').write_text(json.dumps(dict(intervals=records, clusters=named_groups,
+                                                        visual_clusters=result.visual_clusters,
                                                         warnings=result.warnings, diagnostics=diagnostics), indent=2))
     overlay = Image.new('RGB', (image.width + 300, image.height), 'white')
     overlay.paste(image, (0, 0))
     draw = ImageDraw.Draw(overlay)
     for index, row in enumerate(result.intervals):
         assigned = records[index]
-        hue = (int(row.cluster_id[1:]) * 0.61803398875) % 1
+        cluster_id = assigned['cluster_id']
+        number = (int(cluster_id[1:]) if cluster_id.startswith('C') and cluster_id[1:].isdigit()
+                  else int(hashlib.sha256(cluster_id.encode()).hexdigest()[:8], 16))
+        hue = (number * 0.61803398875) % 1
         color = tuple(round(v * 255) for v in colorsys.hsv_to_rgb(hue, 0.7, 0.8))
         draw.line((0, row.top_y, overlay.width, row.top_y), fill=color, width=2)
         draw.rectangle((image.width, row.top_y, image.width + 8, row.bottom_y - 1), fill=color)
         if row.bottom_y - row.top_y >= 14:
             draw.text((image.width + 14, row.top_y + 2),
-                      f"{row.cluster_id}  {assigned['lithology']} [{row.match_status}]"
+                      f"{cluster_id}  {assigned['lithology']} [{row.match_status}]"
                       + (' [runner-up]' if assigned['lithology_fallback'] else ''), fill=color)
     overlay.save(output / f'{stem}.png')
     # Compact review sheet: a representative interval beside its matched swatch.
     # Unknown clusters show the nearest CANDIDATE, explicitly not an assignment.
-    if result.clusters:
-        sheet = Image.new('RGB', (1200, math.ceil(len(result.clusters) / 4) * 260), 'white')
+    if named_groups:
+        sheet = Image.new('RGB', (1200, math.ceil(len(named_groups) / 4) * 260), 'white')
         draw = ImageDraw.Draw(sheet)
         by_name = {s.name: s.image for s in swatches}
-        for index, cluster in enumerate(result.clusters):
+        for index, cluster in enumerate(named_groups):
             x, y = (index % 4) * 300, (index // 4) * 260
             row = result.intervals[cluster['representative_index']]
             assigned = records[cluster['representative_index']]
-            title = f"{row.cluster_id}: {assigned['lithology']} ({cluster['interval_count']} intervals)"
+            title = f"{cluster['cluster_id']}: {assigned['lithology']} ({cluster['interval_count']} intervals)"
             draw.text((x + 5, y + 5), '\n'.join(textwrap.wrap(title, 38)), fill='black')
-            detail = row.match_status
+            detail = f"{cluster['verified_intervals']} verified, {cluster['fallback_intervals']} fallback"
             if row.match_seam_score is not None:
-                detail += f'  seam={row.match_seam_score:.3f}'
+                detail += f'  rep seam={row.match_seam_score:.3f}'
             draw.text((x + 5, y + 35), detail, fill='black')
             center = (row.top_y + row.bottom_y) // 2
             patch = image.crop((0, max(row.top_y, center - 90), image.width,

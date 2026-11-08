@@ -13,7 +13,7 @@ from geolens.services.archive_loader import (
     ArchiveError,
     extract_archive,
 )
-from geolens.services.data_processor import build_document
+from geolens.services.data_processor import CSV_PROCESSING_VERSION, build_document
 from geolens.utils.helpers import stable_id
 
 SINGLE_KEY = "single_document"
@@ -24,7 +24,16 @@ def get_collection() -> DocumentCollection:
     """Return the session document collection, creating it if needed."""
     if COLLECTION_KEY not in st.session_state:
         st.session_state[COLLECTION_KEY] = DocumentCollection()
-    return st.session_state[COLLECTION_KEY]
+    collection = st.session_state[COLLECTION_KEY]
+    if st.session_state.get('collection_processing_version') != CSV_PROCESSING_VERSION:
+        from geolens.services.cluster_ids import align_pipeline_cluster_ids
+        from geolens.services.validation import check_document
+        for record in collection:
+            record.processed_df = align_pipeline_cluster_ids(record.processed_df)
+            if record.schema_check.is_valid and not record.load_error:
+                record.findings = check_document(record.processed_df, document_id=record.document_id)
+        st.session_state['collection_processing_version'] = CSV_PROCESSING_VERSION
+    return collection
 
 
 def get_single_document() -> DocumentRecord | None:
@@ -79,7 +88,7 @@ def _render_single_csv_upload() -> DocumentRecord | None:
         return None
 
     csv_bytes = csv_file.getvalue()
-    signature = stable_id(csv_file.name, hashlib.sha256(csv_bytes).hexdigest())
+    signature = stable_id(CSV_PROCESSING_VERSION, csv_file.name, hashlib.sha256(csv_bytes).hexdigest())
     existing = st.session_state.get('single_csv_document')
     if existing is not None and st.session_state.get("single_signature") == signature:
         set_single_document(existing)
