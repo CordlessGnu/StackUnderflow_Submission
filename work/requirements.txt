@@ -1,0 +1,9 @@
+# Python 3.12. Install PyTorch first for your machine:
+#   NVIDIA GPU (CUDA 12.8):  pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+#   CPU only:                pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+# then: pip install -r requirements.txt
+numpy==2.5.4
+pillow==13.0.0
+opencv-python-headless==5.0.0.93
+tifffile==2026.10.15
+imagecodecs==2026.10.10
