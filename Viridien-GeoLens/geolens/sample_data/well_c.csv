@@ -1,0 +1,8 @@
+top_y,bottom_y,cluster_id,lithology,top_depth,base_depth
+80,180,Z1,Shale,500.0,550.0
+180,260,Z2,Limestone,550.0,590.0
+260,400,Z3,Sandstone,590.0,660.0
+400,470,Z4,Evaporite,660.0,695.0
+470,540,Z1,Shale,695.0,730.0
+540,660,Z3,Sandstone,730.0,790.0
+660,720,Z5,Conglomerate,790.0,820.0

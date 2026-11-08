@@ -1,0 +1,19 @@
+# GeoLens is dark-mode only. This forces Streamlit's own widgets (labels,
+# captions, dataframes, inputs) onto the dark palette so no text renders black
+# on a dark background. The user cannot switch themes.
+
+[theme]
+base = "dark"
+primaryColor = "#4FA3C7"
+backgroundColor = "#0B1220"
+secondaryBackgroundColor = "#131C2B"
+textColor = "#DCE5EF"
+font = "sans serif"
+
+[client]
+# Minimal toolbar removes the Deploy button and status widget.
+toolbarMode = "minimal"
+showErrorDetails = true
+
+[browser]
+gatherUsageStats = false

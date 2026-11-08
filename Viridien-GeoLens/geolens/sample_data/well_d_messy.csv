@@ -1,0 +1,11 @@
+top_y,bottom_y,cluster_id,lithology,top_depth,base_depth
+100,180,M1,Shale,300.0,340.0
+180,240,M2,,340.0,370.0
+240,300,M3,Siltstone,370.0,400.0
+300,340,M3,Siltstone,400.0,420.0
+340,400,M4,Sandstone,410.0,430.0
+400,460,M5,Sandstone,430.0,460.0
+460,520,M6,Shale,470.0,500.0
+520,560,M7,Shale,500.0,520.0
+560,600,M8,Coal,520.0,540.0
+600,640,M9,Coal,540.0,560.0
