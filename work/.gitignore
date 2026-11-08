@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+# regenerable / large (~650 MB): page cache, all predictions, previews, raw checkpoints, frozen v0.1 copy
+cache/
+outputs/
+previews/
+checkpoints/
+versions/
+# export/*.pt (16 MB each) IS meant to be committed: that is the model teammates use
