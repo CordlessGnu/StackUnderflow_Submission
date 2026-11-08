@@ -40,8 +40,47 @@ class TextureBoundaryTests(unittest.TestCase):
     def test_same_pattern_different_color(self):
         image = self.image.copy()
         image[600:] = np.where(self.horizontal[600:, :, None], 0, [255, 255, 0])
+        self.assertEqual(detect_boundaries(image, window=48, use_color=False).boundaries, [])
+        self.assertCutsNear(detect_boundaries(image, window=48).boundaries, [600])
+
+    def test_solid_colors_with_identical_maximum_channel(self):
+        # The previous ink extractor sees no difference between these fills.
+        image = np.empty_like(self.image)
+        image[:600] = [255, 255, 0]
+        image[600:] = [0, 255, 255]
+        self.assertCutsNear(detect_boundaries(image, window=48).boundaries, [600])
+        self.assertEqual(detect_boundaries(image, window=48, use_color=False).boundaries, [])
+
+    def test_color_mixtures_with_identical_rgb_means(self):
+        image = np.empty_like(self.image)
+        image[:600, ::2] = [255, 0, 0]
+        image[:600, 1::2] = [0, 255, 255]
+        image[600:, ::2] = [0, 255, 0]
+        image[600:, 1::2] = [255, 0, 255]
+        np.testing.assert_equal(image[:600].mean(axis=(0, 1)), image[600:].mean(axis=(0, 1)))
+        self.assertCutsNear(detect_boundaries(image, window=48).boundaries, [600])
+
+    def test_colored_strokes_change_orientation(self):
+        image = np.full_like(self.image, 255)
+        image[:600][self.horizontal[:600]] = [0, 255, 0]
+        image[600:][self.vertical[600:]] = [0, 255, 0]
+        self.assertCutsNear(detect_boundaries(image, window=48).boundaries, [600])
+        self.assertEqual(detect_boundaries(image, window=48, use_color=False).boundaries, [])
+
+    def test_uniform_colored_texture_with_scan_noise(self):
+        image = np.full_like(self.image, [255, 255, 0])
+        image[self.horizontal] = [255, 0, 0]
+        rng = np.random.default_rng(13)
+        image = np.clip(image.astype(int) + rng.integers(-5, 6, image.shape), 0, 255).astype(np.uint8)
         self.assertEqual(detect_boundaries(image, window=48).boundaries, [])
-        self.assertCutsNear(detect_boundaries(image, window=48, use_color=True).boundaries, [600])
+
+    def test_rule_suppression_does_not_mutate_input(self):
+        from texture_boundaries import _row_features
+        image = self.image.astype(np.float32) / 255
+        image[600:602] = 0
+        original = image.copy()
+        _row_features(image, ignore_rules=True, use_color=True)
+        np.testing.assert_equal(image, original)
 
     def test_blank_to_texture(self):
         image = self.image.copy()

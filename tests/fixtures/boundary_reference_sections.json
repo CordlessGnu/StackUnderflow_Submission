@@ -1,0 +1,23 @@
+{
+  "notes": "Small development checks, not held-out lithology ground truth. Colour-contact references were obtained from exact native fill-palette votes in visually reviewed sections, ignoring dark stroke rows. log05 freezes the previous detector's user-approved boundaries as a regression control, not an independent localization annotation.",
+  "color_sections": [
+    {
+      "image": "60807402860000_gb506_2_md_mudlog.png",
+      "range": [500, 1100],
+      "palette": [[255, 255, 255], [128, 255, 128], [255, 255, 0]],
+      "boundaries": [522, 609, 617, 649, 661, 673, 681, 737, 753, 769, 793, 817, 837, 841, 853, 869, 885, 925, 941, 981, 997, 1037, 1053]
+    },
+    {
+      "image": "60808400140000_hadrian_2_masterlog_2in_10000-21962.png",
+      "range": [16800, 17400],
+      "palette": [[202, 202, 202], [255, 178, 110], [255, 255, 204]],
+      "boundaries": [16844, 16860, 16889, 16897, 16961, 16972, 17012, 17028, 17062.5, 17088, 17104, 17132, 17143, 17148, 17156, 17167, 17183, 17210, 17220, 17255, 17265, 17282, 17290, 17314, 17327, 17345, 17358, 17377, 17390]
+    }
+  ],
+  "regression_controls": [
+    {
+      "image": "0000000009_d-582_0000020435-0001_log05_chromatograph_ratio.png",
+      "boundaries": [202, 404, 609, 1005, 1209, 1406, 1810, 2004, 2611, 2807, 3412, 3608, 3814, 4007, 4615, 4810, 5215, 5410, 5811, 6015, 6612, 6815, 7011]
+    }
+  ]
+}

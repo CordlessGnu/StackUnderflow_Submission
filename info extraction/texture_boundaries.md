@@ -1,151 +1,199 @@
-# Texture-based interval boundary detection
+# Thin-bed-aware RGB and texture boundaries
 
-Implementation: `info extraction/texture_boundaries.py`.
-Dependencies: NumPy and Pillow (already in `requirements.txt`). No trained model,
-legend extraction, OCR, SciPy, or additional dependency is required.
+Implementation: **`info extraction/texture_boundaries.py`**. The complete TIFF +
+bbox JSON entry point, **`pipeline.py`**, uses this detector automatically.
+Dependencies remain NumPy and Pillow; no training, OCR, or legend is needed here.
 
-This is a separate experimental baseline. The existing `boundary_detection.py`
-and its local edits have not been changed.
+## Why the detector changed
 
-## Why not just convolve the image with an edge detector?
+The original detector combined two texture windows and suppressed cuts closer
+than the base window. That often found only one side of a thin yellow bed and
+could place a broad score peak 5–15 pixels from the contact.
 
-A horizontal-edge filter detects every repeated dash and every gridline, not just
-lithology changes. Instead, use **texture change-point detection**:
+The updated detector separates **texture context**, **colour-contact evidence**,
+**minimum bed thickness**, and **contact localization**. No filename-specific
+parameters or lithology palettes are used in the implementation.
 
-1. Trim the sides of the crop to reduce border/gutter interference.
-2. Extract dark ink, mostly independently of a bright coloured background.
-3. Compute per-row gradient orientation histograms, ink density, and horizontal
-   and vertical pixel differences at several offsets. Pool across column width.
-4. At every possible boundary, average these features in windows immediately
-   above and below it. Cumulative sums keep this efficient even on very tall logs.
-5. Compare the pooled statistics. Orientation histograms use Hellinger distance;
-   other features capture density, spacing, blank regions, and solid fills.
-6. Combine scores from two window sizes, smooth the result, and select separated
-   peaks above a threshold.
+### 1. Conservative multiscale texture proposals
 
-Repeated marks in one lithology should have similar *pooled statistics*, even if
-individual pixels do not align. Horizontal and vertical dashes remain distinct;
-the descriptors intentionally are not rotation invariant. Full vertical image
-resolution is preserved. There is no CNN training step.
+The default base context is still width-derived:
 
-The window operations can also be expressed as convolutions over feature maps.
-The important distinction is **filtering/comparing texture statistics**, not
-looking for pixel edges alone.
+```
+max(24, min(96, round(crop_width * 0.6)))
+```
 
-## Run on a supplied crop
+Compare row descriptors above/below each edge at half/base/double/quadruple this
+context. Adjacent scales support texture changes. Prefer the established base
+scale where it works; supplementary proposals require stronger three-scale
+support. Overlapping texture hypotheses for one broad contact are collapsed.
 
-From the repository root:
+This is a scale bank, **not automatic measurement of texture repeat pitch**.
+Texture-only thin beds can still need more context than their thickness permits.
+
+### 2. Independent short-context colour proposals
+
+A per-row dominant-fill profile reduces the influence of black/dark strokes.
+It selects bright pixels by luminance, requires spatial colour agreement, and
+interpolates short drawing-line gaps. Long unsupported dark regions cannot
+propose colour contacts. Small, mixed-colour overprints are often rejected by
+spatial agreement, but this does not eliminate every symbol/text artefact.
+
+Compare this profile with short windows of roughly 2, 4 and 8 pixels by default.
+Unlike a wide texture window, these can see **both** sides of a 2–8 pixel colour
+bed. Fine-scale contacts take priority over wide-window duplicates.
+
+Safeguards reject repeated signed colour edges in a continuing pattern and
+require extra wide-context evidence for mostly shading/brightness-only changes.
+Achromatic drawing-line variation does not activate the colour rescue. Otherwise,
+a brick pattern's repeated horizontal strokes could become hundreds of false
+intervals. Short dark dips are treated as drawing strokes, so very thin dark
+beds remain a limitation.
+
+### 3. Local contact refinement
+
+Within a bounded neighbourhood, choose the split that minimizes within-region
+RGB fill error on its two sides. Neighbouring proposed contacts constrain the
+search, preventing refinement from crossing a thin bed's other edge.
+
+Where no reliable colour contrast exists, retain the texture estimate instead
+of snapping to an arbitrary dash or dot. This deliberately preserves the working
+black-and-white control.
+
+### 4. Split/merge verification
+
+Pool descriptors inside adjacent proposed intervals, excluding a small edge
+margin. Remove weak cuts whose neighbouring interiors agree in both colour and
+texture. Keep a coherent colour change even when one bed is very short. Do not
+simultaneously erase both sides of a candidate bed in one verification pass.
+
+The final minimum interval height is independent of texture context, defaulting
+to **2 pixels**. This does not guarantee every 2-pixel texture-only bed is visible;
+it prevents a wide texture window from automatically deleting a strong colour
+contact merely because another contact is nearby.
+
+## Run on a column crop
 
 ```bash
 python 'info extraction/texture_boundaries.py' \
-  'crops/interpreted_lithology_column/0000000009_d-582_0000020435-0001_log02_fe_5in_md.png' \
-  --output crops/boundary_examples
+  'crops/interpreted_lithology_column/60807402860000_gb506_2_md_mudlog.png' \
+  --output crops/boundary_refinement
 ```
 
-Produces three files with the source stem:
+Produces files with the source image stem:
 
-- `.csv`: `top_y,bottom_y`, one row per interval.
-- `.png`: original crop with internal boundaries drawn in red.
-- `.scores.npy`: the diagnostic change-score curve, length `image_height + 1`.
+- `.csv`: `top_y,bottom_y`, one row per contiguous interval.
+- `.png`: native-resolution column with red internal boundary lines.
+- `.scores.npy`: combined diagnostic scores at pixel edges, length H+1.
+- `.color_scores.npy`: separate fill-colour change scores.
+- `.parameters.json`: base/effective scales, minimum thickness, thresholds and
+  refinement radius.
 
-Coordinates are **crop-local** and intervals are **half-open**:
-`[top_y, bottom_y)`. Intervals cover the entire input crop without gaps or overlaps,
-including blank portions. Image top and bottom are interval edges, not detected
-internal changes. Scores are not probabilities or calibrated confidence values.
+Coordinates are **crop-local**, half-open `[top_y,bottom_y)`. Intervals cover the
+entire input, including blanks. The full `pipeline.py` may export document-level
+coordinates separately; this stage's CSV remains crop-local.
 
-## Python API
-
-When importing from elsewhere, put `info extraction/` on `sys.path` or load the
-module using your application's module loader:
+## API and tuning
 
 ```python
 import sys
 sys.path.insert(0, 'info extraction')
 from texture_boundaries import detect_boundaries
 
-result = detect_boundaries(
-    'crops/interpreted_lithology_column/0000000009_d-582_0000020435-0001_log02_fe_5in_md.png',
-    window=96,
-    threshold=0.16,
-)
-print(result.boundaries)  # internal y coordinates only
-print(result.intervals)   # [(0, first_cut), ..., (last_cut, image_height)]
+result = detect_boundaries('column.png')
+print(result.boundaries, result.intervals)
+print(result.scales, result.min_interval, result.refine_radius)
 ```
 
-Inputs may also be PIL images or uint8 grayscale/RGB/RGBA arrays.
+Inputs may be paths, PIL images, or uint8 grayscale/RGB/RGBA arrays. Existing
+`BoundaryResult.boundaries`, `.intervals`, `.scores`, `.threshold` and `.window`
+remain available. Additional diagnostic fields expose effective settings.
 
-## Tuning
+| Parameter / CLI flag | Default | Purpose |
+|---|---|---|
+| `window` / `--window` | width-derived | Base texture context, not a minimum bed size |
+| `min_interval` / `--min-interval` | **2** | Final minimum spacing/thickness in pixels |
+| `threshold` / `--threshold` | 0.16 | Texture-change score threshold |
+| `color_threshold` / `--color-threshold` | **0.10** | RMS RGB fill-change threshold in normalized RGB units |
+| `refine_radius` / `--refine-radius` | **up to 24 px** | Bounded colour-contact localization search; 0 disables refinement |
+| `margin` / `--margin` | 0.12 per side | Trim borders/gutters |
+| `use_color` | True | RGB texture and short-context colour evidence; `--no-color` disables |
+| `ignore_rules` | True | Suppress short nearly full-width dark rules in texture features; `--keep-rules` disables |
 
-- **`window`**: rows on each side of a candidate; the second scale uses twice
-  this size. Use at least 2–3 vertical pattern repetitions. Increase it when
-  repeated strokes produce false cuts; decrease it for thinner beds. The default
-  is `max(24, min(96, round(crop_width * 0.6)))`, a heuristic, **not** automatic
-  measurement of repeat pitch.
-- **`threshold`**: default `0.16`. Raise it for fewer, stronger cuts; lower it
-  for subtle changes. It is an empirical score threshold, not a probability.
-- **`min_interval`**: default `window // 2`. Effective minimum cut spacing and
-  distance from image edges is `max(min_interval, window)`. This intentionally
-  avoids duplicate peaks, but limits thin-bed detection.
-- **`margin`**: default `0.12` of the crop width removed from **each** side.
-  Adjust this for crops containing borders or neighbouring tracks.
-- **`use_color` / `--use-color`**: off by default, so a bright fill-colour change
-  alone does not create a boundary. Enable if colour differences are meaningful.
-- **`ignore_rules`**: on by default; removes short nearly full-width dark rules.
-  Use `--keep-rules` if these might instead be genuine thin solid beds.
+Increase `color_threshold` to reject weaker colour fluctuations. Increase
+`min_interval` only when intentionally discarding thinner beds. Large texture
+windows no longer impose their size on colour-contact spacing. Lower thresholds
+or tiny minimum heights can increase oversegmentation.
+
+The same `--color-threshold` and `--refine-radius` controls are available in
+`pipeline.py`, `interval_lithology.py`, and `final_output.py`; those entry points
+call the shared detector. The full pipeline records effective scales, spacing,
+and refinement settings in `run.json` and saves `boundary_color_scores.npy`.
+
+Scores are diagnostic, **not probabilities**. The combined curve includes
+rescaled colour evidence; not every curve peak is an accepted boundary because
+periodicity, refinement, spacing and split/merge checks follow proposal scoring.
+
+## Before/after examples
+
+Generated outputs are in **`crops/boundary_refinement/`**:
+
+- **`comparison.png`**: old/new overlays for GB506, Hadrian and log05, with row
+  rulers. Each panel has old on the left and new on the right.
+- Per-document CSVs, full overlays and diagnostic arrays.
+- `comparison_metrics.json`: section-level development checks.
+- `gb506_pipeline/` and `hadrian_pipeline/`: complete new TIFF + JSON runs,
+  including final cluster/lithology/depth CSVs and annotated columns.
+
+Small, visually reviewed development sections use exact native fill-palette
+contacts as references. This checks colour contacts, **not comprehensive semantic
+lithology ground truth**. Source palettes are only in test fixtures, never in the
+algorithm.
+
+| Section | Reference contacts | Old within 3 px | New within 3 px |
+|---|---:|---:|---:|
+| GB506 rows 500–1100 | 23 | 11 | **23** |
+| Hadrian rows 16800–17400 | 29 | 8 | **29** |
+
+All 52 contacts in those sections are localized within **1 pixel** of the
+palette-contact reference (one reference is a half-pixel contact through a dark
+separator). Complete interior colour intervals recovered at both ends improve
+from 2/22 to 22/22 for GB506 and 1/28 to 28/28 for Hadrian.
+
+The user-approved **log05** control retains **all 23 internal boundaries at
+exactly the previous coordinates**. This is a regression check, not independent
+localization ground truth.
 
 ## Validation and limits
 
-Nine synthetic regression tests cover repeating textures, orientation changes
-and returns, colour-only changes, blank-to-texture transitions, solid beds,
-horizontal rules, input formats, short images, and invalid parameters:
-
 ```bash
-python -m unittest discover -s tests -v
+python -B -m unittest discover -s tests -v
 ```
 
-A smoke test completed on all **51** supplied column crops without errors and
-verified finite scores and complete interval coverage (about 30 seconds total
-in the development environment). This tests execution, **not boundary accuracy**.
-The first 2,200 rows of the d-582 `log02_fe_5in_md` crop were visually inspected;
-the predicted lines track the obvious dash/dot pattern transitions there. No
-manual ground-truth interval set or held-out precision/recall has been measured.
+The suite contains **90 tests**, including 19 new refinement tests: 17 synthetic
+checks and two optional local-crop checks. Real-crop tests are skipped in bare CI
+without the supplied images. Synthetic coverage includes 2–30 pixel colour beds,
+window changes, contacts near image edges, multiple short beds, grid rules,
+periodic drawings, local refinement, unsupported black regions and parameter
+validation. Existing clustering/depth/full-document tests remain in the suite.
 
-Known limitations:
+All 51 supplied crop images were also smoke-tested for finite scores, contiguous
+intervals, and complete image coverage. This verifies execution, **not accuracy
+across all logs**. The new detector is more sensitive to short colour changes;
+other coloured artwork, noise or overprints may still cause extra cuts.
 
-- Overprinted symbols, text, page breaks, and scan defects can produce false
-  boundaries. Some Rio Lavaca examples have symbols over otherwise repeated
-  texture that trigger extra cuts.
-- Similar textures with identical pooled features can be merged. Large windows
-  can miss thin beds or move the peak away from the exact contact.
-- Dark backgrounds and coloured strokes violate the default dark-ink/bright-fill
-  assumption. Colour invariance is approximate, not universal.
-- The fixed side trim does not deskew the column or follow drifting borders.
-- Sparse textures leave ambiguity between the last mark of one pattern and the
-  first mark of the next. Reported y positions should not be assumed pixel-exact.
-- This detects changes only: no clustering, lithology naming, depth conversion,
-  header removal, or full-document region detection is implemented here.
+Remaining limitations:
 
-## Integrating with the eventual document-image pipeline
+- Same-colour, very thin texture changes still require enough pattern evidence.
+- Very dark fills, subtle same-hue shading changes and 1-pixel beds are not
+  reliably rescued by the dominant bright-fill channel.
+- Truly regular alternating colour beds can resemble one repeating texture;
+  the periodicity veto may suppress some of them.
+- Symbols/text can still produce false cuts. Fixed side trimming does not deskew
+  columns or follow drifting borders.
+- Gradual contacts and sparse marks may not define a unique exact pixel edge.
+- Local development checks are not a held-out accuracy evaluation; broader manual
+  annotation and precision/recall versus bed thickness remain future work.
 
-Keep region location and interval segmentation separate:
-
-```
-full document image
-  -> locate interpreted-lithology bounding box
-  -> crop at native resolution
-  -> detect_boundaries(crop)
-  -> cluster interval textures / match the document's legend
-  -> calibrate y against depth labels
-  -> export final CSV and annotated image
-```
-
-If the crop starts at document row `crop_top`, add `crop_top` to every local
-boundary to obtain document-image y coordinates. If the crop was resized, also
-undo that scale. The function already accepts a PIL crop, so a later detector can
-call it without saving an intermediate image.
-
-For a scored evaluation, manually label several representative logs, match
-predictions to reference boundaries within a declared pixel tolerance, and report
-precision/recall and localization error. Tune on development logs and keep other
-logs held out. Legend-informed classification or a trained segmentation model
-can be added later if these failure cases dominate.
+No clustering, legend matching or depth calibration is performed in this module;
+those remain separate pipeline stages. The legacy detector is preserved under
+`wastebin/info extraction/` and is not imported.
